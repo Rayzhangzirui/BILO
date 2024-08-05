@@ -8,6 +8,7 @@ from SimpleODEProblem import SimpleODEProblem
 from LorenzProblem import LorenzProblem
 from VarPoiProblem import VarPoiProblem
 from HeatProblem import HeatProblem
+from BurgerProblem import BurgerProblem
 from varFKproblem import varFKproblem
 from DarcyProblem import DarcyProblem
 
@@ -33,6 +34,8 @@ def create_pde_problem(pde_opts):
         return varFKproblem(**pde_opts)
     elif problem_type == 'heat':
         return HeatProblem(**pde_opts)
+    elif problem_type == 'burger':
+        return BurgerProblem(**pde_opts)
     elif problem_type == 'darcy':
         return DarcyProblem(**pde_opts)
     else:

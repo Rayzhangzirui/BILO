@@ -242,8 +242,8 @@ class VarPoiExpRunner(ExperimentRunner):
         self.init_opt = f"max_iter 20000 testcase 0  experiment_name {self.init_exp}"
 
         # inverse problem setup
-        self.inv_exp = "poivar2_inv"
-        self.inv_opt = f"l1grad None l2grad 1e-3 max_iter 10000 experiment_name {self.inv_exp}"
+        self.inv_exp = "poivar2_inv_reg-4"
+        self.inv_opt = f"l1grad None l2grad 1e-4 max_iter 10000 experiment_name {self.inv_exp}"
         self.inv_testcase = 9
         # 9 = hat function
 
@@ -278,6 +278,69 @@ class HeatExpRunner(ExperimentRunner):
         self.nzopt = 'use_noise True N_dat_train 21 variance 0.001'
         
         self.seeds = [0,1,2,3,4]
+
+
+class BurgerExpRunner(ExperimentRunner):
+    def __init__(self, dryrun=True):
+        # call the parent class constructor
+        super().__init__(dryrun)
+
+        # common setup
+        self.common = "problem burger flags fixiter  Nt 51 Nx 51 datafile dataset/burger-02.mat fwidth 64 width 128 output_activation id "
+        
+        # init setup
+        self.init_exp = "burger_init"
+        self.init_opt = f"max_iter 10000 testcase 3 experiment_name {self.init_exp}"
+
+        # inverse problem setup
+        self.inv_exp = "burger_inv_ndat21"
+        self.inv_opt = f"l1grad None l2grad 1e-3 max_iter 10000 experiment_name {self.inv_exp} N_ic_train 102"
+
+        # weights for vanilla experiments
+        self.vanilla_weights = [ '1e1', '1e2', '1e3']
+        
+        # self.nzopt = 'use_noise True N_dat_train 21 variance 0.001'
+        self.nzopt = 'use_noise None N_dat_train 19'
+        
+        self.seeds = [0]
+    
+    def create_tasks(self):
+        # create a list of tasksList
+        all_tasks = []
+        testcases = [1,2,3,4]
+        
+        for i in testcases:
+            init_test = i
+            
+            init_runname = f"simu_init_t{init_test}"
+            command = f"./runexp.py {self.common} {self.init_opt} traintype adj-init run_name {init_runname} testcase {init_test}"
+
+            if check_run_success(self.init_exp, init_runname):
+                command = None
+            
+            parent = TaskList(command)
+
+            for j in testcases:
+                # inverse problem
+                # skip the same testcase
+                if i == j:
+                    continue
+
+                inv_test = j
+            
+                inv_runname = f"simu_i{init_test}_t{inv_test}_l2reg-3_n19"
+                command = f"./runexp.py {self.common} {self.inv_opt} traintype adj-simu {self.nzopt} run_name {inv_runname} testcase {inv_test} restore {self.init_exp}:{init_runname}"
+
+                if check_run_success(self.inv_exp, inv_runname):
+                    command = None
+
+                parent.add_child(command)
+
+            
+            all_tasks.append(parent)
+
+
+        return all_tasks
 
 
 
@@ -316,7 +379,7 @@ class DarcyExpRunner(ExperimentRunner):
         
         # init setup
         self.init_exp = "darcy_sig_init"
-        self.init_opt = f"max_iter 10000 testcase 0 experiment_name {self.init_exp} datafile dataset/darcy_sigmoid.mat"
+        self.init_opt = f"max_iter 10000 experiment_name {self.init_exp} datafile dataset/darcy_sigmoid.mat"
 
         # inverse problem setup
         self.inv_exp = "darcy_inv"
@@ -326,8 +389,11 @@ class DarcyExpRunner(ExperimentRunner):
         # create a list of tasksList
         all_tasks = []
 
-        testcases = [3, 4, 5]
-        inf = [4, 5, 3]
+        # testcases = [3, 4, 5]
+        # inf = [4, 5, 3]
+
+        testcases = [ 2, 2]
+        inf = [ 5, 3]
 
         all_tasks = []
 
@@ -489,6 +555,8 @@ if __name__ == "__main__":
             experiment = VarPoiExpRunner(dryrun=args.dryrun)
         case "heat":
             experiment = HeatExpRunner(dryrun=args.dryrun)
+        case "burger":
+            experiment = BurgerExpRunner(dryrun=args.dryrun)
         case "ode":
             experiment = odeExpRunner(dryrun=args.dryrun)
         case "fkop":

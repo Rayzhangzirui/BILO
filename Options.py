@@ -23,7 +23,7 @@ default_opts = {
         'trainable_param': '', # list of trainable parameters, e.g. 'D,rho'
         'init_param': '', # nn initial parameter as string, e.g. 'D,1.0'
         'datafile': '',
-        'dat_use_res': False, # used in fkproblem and heatproblem, use res as training data
+        'dat_use_res': False, # used in fkproblem, use res as training data
         'testcase': 0,
         # for heat problem 0.1 and poisson problem
         'D': 0.1,
@@ -177,7 +177,7 @@ class Options(BaseOptions):
             # remove D0 key
             self.opts['pde_opts'].pop('D0', None)
         
-        if self.opts['pde_opts']['problem'] in {'poivar','heat','varfk','darcy'}:
+        if self.opts['pde_opts']['problem'] in {'poivar','heat','burger','varfk','darcy'}:
             # merge func_opts to nn_opts, use function embedding
             self.opts['nn_opts'].update(self.opts['func_opts'])
             self.opts['nn_opts']['with_func'] = True
@@ -190,7 +190,7 @@ class Options(BaseOptions):
         
 
         # Need to specify trainable_param, which is used in fullresgrad loss
-        if self.opts['pde_opts']['problem'] in {'heat'}:
+        if self.opts['pde_opts']['problem'] in {'heat','burger'}:
             self.opts['pde_opts']['trainable_param'] = 'u0'
         
         if self.opts['pde_opts']['problem'] in {'poivar'}:

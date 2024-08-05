@@ -102,7 +102,6 @@ def get_active_artifact_path(filename):
     return file_path
 
 
-
 def load_artifact(exp_name=None, run_name=None, run_id=None, name_str=None):
     """ 
     Load options and artifact paths from mlflow run id or name
