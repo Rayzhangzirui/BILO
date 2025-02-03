@@ -4,8 +4,11 @@ import sys
 from scipy.io import loadmat, savemat
 import numpy as np
 import torch
+from itertools import cycle
+# torhch dataset
+from torch.utils.data import Dataset, DataLoader
 
-class DataSet(dict):
+class MatDataset(dict):
     '''data set class
     interface between .mat file and python
     access data set as dictionary
@@ -20,6 +23,11 @@ class DataSet(dict):
             self.readmat(file_path)
         else:
             super().__init__(*args, **kwargs)
+
+        self.loader = {}
+        self.iter = {}
+        self.batch = {}
+        self.device = torch.device('cpu')
 
 
     def readmat(self, file_path, as_torch=True):
@@ -102,6 +110,7 @@ class DataSet(dict):
     
     def to_device(self, device):
         print(f'move dataset to {device}')
+        self.device = device
         for key, value in self.items():
             try:
                 self[key] = value.to(device)
@@ -131,14 +140,21 @@ class DataSet(dict):
         for var in vars:
             self[var+'_train'] = self[var][:n]
         
+        new_vars = [var+'_train' for var in vars]
+        return new_vars
+
     def subsample_unif_astrain(self, n, vars):
         '''subsample n row uniformly for training. 
         add _train suffix to variable name
         '''
         N = self[vars[0]].shape[0]
         idx = np.random.choice(N, n, replace=False)
+        new_vars = []
         for var in vars:
-            self[var+'_train'] = self[var][idx]
+            new_var  = var+'_train'
+            new_vars.append(new_var)
+            self[new_var] = self[var][idx]
+        return new_vars
             
     def remove(self, keys):
         '''remove variables that contains substr
@@ -146,7 +162,35 @@ class DataSet(dict):
         for key in keys:
             self.pop(key, None)
             print(f'remove {key}')
+
+    def configure_dataloader(self, loader_name, loader_var, **loader_opts):
+        self.loader[loader_name] = DataLoader(CustomDataset(self, loader_var), **loader_opts)
+        self.iter[loader_name] = cycle(self.loader[loader_name])
+        self.batch[loader_name] = next(self.iter[loader_name])
     
+    def next_batch(self):
+        # update batch for each loader
+        for loader_name in self.loader:
+            self.batch[loader_name] = next(self.iter[loader_name])
+    
+
+
+# pytorch dataset
+class CustomDataset(Dataset):
+    def __init__(self, matdataset, keys):
+        self.matdataset = matdataset
+        self.keys = keys
+        # assert all keys have the same length
+        assert all(self.matdataset[key].shape[0] == self.matdataset[keys[0]].shape[0] for key in keys)
+        self.num_samples = self.matdataset[keys[0]].shape[0]
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        # Create a dictionary to return all requested variables with their corresponding keys
+        data = {key: self.matdataset[key][idx] for key in self.keys}
+        return data
 
 if __name__ == "__main__":
     # read mat file and print dataset
@@ -155,7 +199,7 @@ if __name__ == "__main__":
     # which variables to print
     vars2print = sys.argv[2:] if len(sys.argv) > 2 else None
 
-    dataset = DataSet(filename)
+    dataset = MatDataset(filename)
     
     dataset.to_torch()
     if vars2print is None:

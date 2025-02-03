@@ -119,14 +119,51 @@ def load_artifact(exp_name=None, run_name=None, run_id=None, name_str=None):
     artifact_paths = helper.get_artifact_dict_by_id(run_id)
     
     return artifact_paths
+
+def compare_dicts(dict1, dict2, path=""):
+    diffs = {}
+    for key in set(dict1.keys()).union(dict2.keys()):
+        new_path = f"{path}.{key}" if path else key
+        if key not in dict1:
+            diffs[new_path] = (None, dict2[key])
+        elif key not in dict2:
+            diffs[new_path] = (dict1[key], None)
+        else:
+            if isinstance(dict1[key], dict) and isinstance(dict2[key], dict):
+                nested_diffs = compare_dicts(dict1[key], dict2[key], new_path)
+                diffs.update(nested_diffs)
+            elif dict1[key] != dict2[key]:
+                diffs[new_path] = (dict1[key], dict2[key])
+    return diffs
     
 if __name__ == "__main__":
-    # test if can get run_id corretly
-    # python MlflowHelper.py experiment_name=experiment_1 run_name=run_1
-    # python MlflowHelper.py run_id=1a2b3c4d5e6f7g8h9i0j
-    
+    import sys
+    from pprint import pprint
+
     helper = MlflowHelper()
-    kwargs = dict(arg.split('=') for arg in sys.argv[1:])
-    id = helper.get_run(**kwargs)
-    print(id)
-    print_dict(helper.get_artifact_dict_by_id(id))
+    args = sys.argv[1:]
+
+    if len(args) == 1:
+        # Single run case, output artifact paths
+        name_str = args[0]
+        artifact_paths = load_artifact(name_str=name_str)
+        id = helper.get_run(experiment_name=name_str.split(':')[0], run_name=name_str.split(':')[1])        
+        print(f"Artifact paths for {name_str}:")
+        pprint(artifact_paths)
+    elif len(args) == 2:
+        # Compare the options of two runs
+        name_str1, name_str2 = args
+        artifact_paths1 = load_artifact(name_str=name_str1)
+        artifact_paths2 = load_artifact(name_str=name_str2)
+        
+        # read options.json
+        opts1 = read_json(artifact_paths1['options.json'])
+        opts2 = read_json(artifact_paths2['options.json'])
+
+        # diff options
+        print("Options diff:")
+        diff = compare_dicts(opts1, opts2)
+        pprint(diff)
+    else:
+        print("Usage: python MlflowHelper.py exp_name:run_name [exp_name:run_name]")
+

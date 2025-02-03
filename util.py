@@ -3,6 +3,7 @@ import numpy as np
 import json
 import inspect
 import types
+import traceback
 
 
 class MyEncoder(json.JSONEncoder):
@@ -118,12 +119,13 @@ def flatten(nested_dict):
 
 
 
-def generate_grf(x, a, l):
+def generate_grf(x, std, l):
     """
-    If l is small, it's iid Gaussian, mean 0, variance a (std dev sqrt(a))
+    If l is small, it's iid Gaussian, mean 0, std 
     If l is large, it's a Gaussian random field with mean 0, cov a, and correlation length l.
     
     """
+    a = std**2
     # Ensure x is a torch tensor, if not, convert it to a torch tensor
     if not isinstance(x, torch.Tensor):
         x = torch.tensor(x)
@@ -140,7 +142,6 @@ def generate_grf(x, a, l):
         grf_numpy = np.random.multivariate_normal(mean=np.zeros_like(x_numpy), cov=K)
     else:
         # iid Gaussian
-        std = np.sqrt(a)
         grf_numpy = np.random.normal(loc=0.0, scale=std, size=x_numpy.shape)
 
     # Convert grf_numpy back to a torch tensor, reshaping to match the original shape of x
@@ -178,7 +179,7 @@ def add_noise(dataset, noise_opts, x_name='x_dat_train', u_name='u_dat_train'):
     x = dataset[x_name] # (N,1)
     noise = torch.zeros_like(dataset[u_name])
     for i in range(dim):
-        tmp = generate_grf(x, noise_opts['variance'], noise_opts['length_scale'])
+        tmp = generate_grf(x, noise_opts['std'], noise_opts['length_scale'])
         noise[:,i] = tmp.squeeze()
 
     dataset['noise'] = noise
@@ -216,6 +217,8 @@ def griddata_subsample(gt, gx, u, Nt, Nx):
 
 def uniform_subsample_with_endpoint(x, N):
     '''uniformly subsample x, with the first and last point included'''
+    # assert first dimension is larger than N
+    assert x.shape[0] >= N
     n = x.shape[0]
     idx = np.linspace(0, n-1, N, dtype=int)
     if idx[0] != 0:
@@ -223,3 +226,58 @@ def uniform_subsample_with_endpoint(x, N):
     if idx[-1] != n-1:
         idx[-1] = n-1
     return x[idx]
+
+
+def cart_to_pol(X):
+    """
+    Converts spatial coordinates in X to polar (2D) or spherical (3D) coordinates.
+
+    Parameters:
+    - X (torch.Tensor): Input tensor of shape (n, 1 + xdim), where the first column is time,
+      and the remaining columns are spatial coordinates (xdim = 2 or 3).
+
+    Returns:
+    - torch.Tensor: Output tensor of shape (n, 1 + xdim), containing time, radius, and angles.
+    """
+    time = X[:, 0]
+    coords = X[:, 1:]
+    xdim = coords.shape[1]
+
+    eps = 1e-6
+    
+    if xdim == 2:
+        # 2D case: Convert to polar coordinates
+        x = coords[:, 0]
+        y = coords[:, 1]
+        r = torch.sqrt(x**2 + y**2 + eps)
+        # r = torch.exp(- (x**2 + y**2))
+        theta = torch.atan2(y, x + eps)  # Angle in radians
+        # Stack the results into a tensor
+        result = torch.stack((time, r, theta), dim=1)
+    elif xdim == 3:
+        # 3D case: Convert to spherical coordinates
+        x = coords[:, 0]
+        y = coords[:, 1]
+        z = coords[:, 2]
+        r = torch.sqrt(x**2 + y**2 + z**2)
+        # Avoid division by zero
+        theta = torch.acos(z / (r + eps))  # Colatitude angle
+        phi = torch.atan2(y, x)            # Azimuthal angle
+        # Stack the results into a tensor
+        result = torch.stack((time, r, theta, phi), dim=1)
+    else:
+        raise ValueError("xdim must be 2 or 3")
+
+    return result
+
+
+# decorator for error logging
+def error_logging_decorator(func):
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"Error in function '{func.__name__}': {e}")
+            print(tb)
+    return wrapper

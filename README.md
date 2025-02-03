@@ -2,6 +2,13 @@
 
 This repository contains the code for the paper "[BiLO: Bilevel Local Operator Learning for PDE Inverse Problems](https://arxiv.org/abs/2404.17789)"
 
+
+![title](./fig_bilo_schematics.png)
+
+<!-- <img src="./fig_bilo_schematics.jpg" width="200"> -->
+
+
+
 ## Tutorial
 See the [tutorial](tutorial.ipynb) for example of solving inverse problem using BiLO.
 

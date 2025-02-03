@@ -7,7 +7,7 @@ from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 
 from BaseProblem import BaseProblem
-from DataSet import DataSet
+from MatDataset import MatDataset
 from util import generate_grf, add_noise
 
 
@@ -32,7 +32,7 @@ class SimpleODEProblem(BaseProblem):
         self.output_dim = 2
         self.opts = kwargs
 
-        self.dataset = DataSet(kwargs['datafile'])
+        self.dataset = MatDataset(kwargs['datafile'])
         # get parameter from mat file
         self.param = {}
         Aname = f'A{kwargs["testcase"]}'
@@ -55,7 +55,7 @@ class SimpleODEProblem(BaseProblem):
     def residual(self, nn, x):
         x.requires_grad_(True)
         
-        u_pred = nn(x, nn.params_dict)  # Assuming x.shape is (batch, 1)
+        u_pred = nn(x, nn.pde_params_dict)  # Assuming x.shape is (batch, 1)
         # Initialize tensors
         u_t = torch.zeros_like(u_pred)
         res = torch.zeros_like(u_pred)
@@ -153,9 +153,9 @@ class SimpleODEProblem(BaseProblem):
     def make_prediction(self, net):
         # make prediction at original X_dat and X_res
         with torch.no_grad():
-            self.dataset['upred_res'] = net(self.dataset['x_res'], net.params_dict)
-            self.dataset['upred_dat'] = net(self.dataset['x_dat'], net.params_dict)
-            params = {k: v.item() for k, v in net.params_dict.items()}
+            self.dataset['upred_res'] = net(self.dataset['x_res'], net.pde_params_dict)
+            self.dataset['upred_dat'] = net(self.dataset['x_dat'], net.pde_params_dict)
+            params = {k: v.item() for k, v in net.pde_params_dict.items()}
             self.dataset['ufdm_dat'] = self.solve_ode(params)
         
         self.prediction_variation(net)

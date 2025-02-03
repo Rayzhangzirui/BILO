@@ -1,6 +1,6 @@
 # define problems for PDE
 import torch
-from DataSet import DataSet
+from MatDataset import MatDataset
 
 
 import numpy as np

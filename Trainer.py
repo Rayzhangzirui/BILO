@@ -3,14 +3,34 @@
 # for training the network
 # need: options, network, pde, dataset, lossCollection
 import os
+import abc
 import time
 import torch
 import torch.optim as optim
+import abc
 from lossCollection import lossCollection, EarlyStopping
 from Logger import Logger
 from util import get_mem_stats, set_device, set_seed, print_dict, flatten
 
-class Trainer:
+
+from PyTorch_LBFGS.functions.LBFGS import FullBatchLBFGS
+
+from loralib import mark_only_lora_as_trainable
+from utillora import reset_lora_weights, merge_lora_weights
+
+import torch.profiler
+
+import copy
+
+optimizer_dictionary = {
+    'SGD': optim.SGD,
+    'Adam': optim.Adam,
+    'lbfgs': optim.LBFGS
+}
+
+
+
+class Trainer(abc.ABC):
     def __init__(self, opts, net, pde, device, lossCollection, logger:Logger):
         self.opts = opts
         self.logger = logger
@@ -20,289 +40,129 @@ class Trainer:
         self.info = {}
 
         
-        if opts['whichoptim'] == 'adam':
-            self.optim = optim.Adam
-        elif opts['whichoptim'] == 'adamw':
-            self.optim = optim.AdamW
-        else:
-            raise ValueError(f'optimizer {opts["whichoptim"]} not supported')
-
         self.lossCollection = lossCollection
         
         self.optimizer = {}
+        self.scheduler = {}
 
         # early stopping
         self.estop = EarlyStopping(**self.opts)
 
         self.loss_net = opts['loss_net']
         self.loss_pde = opts['loss_pde']
-
-        self.info['num_params'] = sum(p.numel() for p in self.net.parameters())
-        self.info['num_train_params'] = sum(p.numel() for p in self.net.parameters() if p.requires_grad)
-        
+        self.loss_test = opts['loss_test']
+        self.loss_monitor = opts['loss_monitor']
 
     
-
-    def log_stat(self, wloss_comp, epoch):
-        # log statistics
-        if wloss_comp is None:
-            return
+    def log_trainable_params(self, step):
+        '''
+        log trainable parameters
+        '''
+        for key in self.net.trainable_param:
+            self.logger.log_metrics({key:self.net.all_params_dict[key].item()}, step=step)
         
-        self.logger.log_metrics(wloss_comp, step=epoch)
-        if not self.net.with_func:
-            # log network parameters if param not function
-            self.logger.log_metrics(self.net.params_dict, step=epoch)
+    def log_stat(self, step, stophere, **kwargs):
+        # kwargs is key value pair
+        if step % self.opts['print_every'] == 0 or stophere:
+            for key, val in kwargs.items():
+                if val is not None:
+                    self.logger.log_metrics({key:val}, step=step)
+        
+            # if not self.net.with_func:
+            #     # log network parameters if param not function
+            #     for key in self.net.trainable_param:
+            #         self.logger.log_metrics({key:self.net.all_params_dict[key].item()}, step=step)
+    
+    @torch.no_grad
+    def validate(self, epoch, stophere):
+        if epoch % self.opts['print_every'] == 0 or stophere:
+            val = self.pde.validate(self.net)
+            self.logger.log_metrics(val, step=epoch)
+            
+            # log testing loss
+            wtotal, wloss_comp, uwloss_comp = self.lossCollection.get_wloss_sum_comp(self.loss_test, False)
+            self.logger.log_metrics(uwloss_comp, step=epoch)
     
     def set_grad(self, params, loss):
         '''
         set gradient of loss w.r.t params
         '''
-        grads = torch.autograd.grad(loss, params, create_graph=True, allow_unused=True)
+        grads = torch.autograd.grad(loss, params, retain_graph=False)
         for param, grad in zip(params, grads):
             param.grad = grad
     
-    def set_pde_param_grad(self, loss):
+    def acc_grad(self, params, loss):
         '''
-        set gradient of loss w.r.t pde parameter
+        accumulate gradient of loss w.r.t params
         '''
-        params = self.net.param_pde_trainable
-        grads = torch.autograd.grad(loss, params, create_graph=True, allow_unused=True)
+        grads = torch.autograd.grad(loss, params, retain_graph=False)
         for param, grad in zip(params, grads):
-            param.grad = grad
-
-
-    
-    def config_train(self, traintype = 'vanilla-inv', lr_options = None):
-        self.traintype = traintype
-
-        if traintype == 'vanilla-init' or traintype == 'vanilla-inv':
-            # param_all include all parameters, including requires_grad = False (some pde parameter and embedding)
-            self.optimizer['allparam'] = self.optim(self.net.param_all)
-            self.ftrain = self.train_vanilla
-
-        # other are new method
-        else:
-            optim_param_group = [
-                {'params': self.net.param_net, 'lr': self.opts['lr_net']},
-                {'params': self.net.param_pde_trainable, 'lr': self.opts['lr_pde']}
-            ]
-            self.optimizer['allparam'] = self.optim(optim_param_group,amsgrad=True)
-
-            if traintype == 'adj-init' or traintype == 'adj-simu':
-                # single optimizer for all parameters
-                # learning rate for pde parameter is 0
-                self.ftrain = self.train_simu
-            elif traintype == 'adj-bi1opt':
-                # single optimizer for all parameters, toggle pde_param lr between 0 and lr_pde
-                self.ftrain = self.train_bilevel_singleopt
+            # skip if grad is None
+            if grad is None:
+                continue
+            # if param.grad is None, then initial grad, otherwise accumulate
+            if param.grad is None:
+                param.grad = grad
             else:
-                raise ValueError(f'train type {traintype} not supported')
-
-        if lr_options is None or lr_options['scheduler'] == 'constant':
-            # constant learning rate
-            self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer['allparam'], lr_lambda=lambda epoch: 1)
-
-        elif lr_options['scheduler'] == 'cosine':
-            T_max = self.opts['max_iter']
-            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer['allparam'], T_max=T_max, eta_min= self.opts['lr_pde']/10.0)
-        else:
-            raise ValueError(f'learning rate scheduler {lr_options["scheduler"]} not supported')
+                param.grad += grad
 
     def train(self):
         # move to device
-        self.net.to(self.device)
-        self.pde.dataset.to_device(self.device)
 
-        print(f'train with: {self.traintype}')
+        self.info['num_params'] = sum(p.numel() for p in self.net.parameters())
+        self.info['num_train_params'] = sum(p.numel() for p in self.net.parameters() if p.requires_grad)
+
+        self.net.to(self.device)
+        # self.pde.dataset.device = self.device
+        # self.pde.dataset.to_device(self.device)
+
         start = time.time()
-        try:
-            self.ftrain()
+        
+        # for running
+        try:    
+            self.train_loop()
         except KeyboardInterrupt:
             print('Interrupted by user')
             self.info.update({'error':'interrupted by user'})
+            self.logger.set_tags('status', 'FAILED')
         except Exception as e:
+            self.info.update({'error':str(e)})
+            # mlflow set state to failed
+            print(f'Error: {str(e)}')
+            self.logger.set_tags('status', 'FAILED')
             raise e
+            
+
+        # for profiling
+        # writer = torch.utils.tensorboard.SummaryWriter(log_dir='./log/tmp')
+
+        # with torch.profiler.profile(
+        #         activities=[
+        #             torch.profiler.ProfilerActivity.CPU,
+        #             torch.profiler.ProfilerActivity.CUDA],
+        #         record_shapes=True,
+        #         profile_memory=True,
+        #         with_stack=False,
+        #         ) as prof:
+        #     self.train_loop()
+        # # prof.export_chrome_trace("profiler_trace.json")
+        # # writer.close()
+        # print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
         
         # log training info
         if self.estop.epoch > 0:
             end = time.time()
             sec_per_step = (end - start) / self.estop.epoch
-            mem =  get_mem_stats()
             self.info.update({'sec_per_step':sec_per_step})
-            self.info.update(mem)
+            if 'total_lower_step' in self.info:
+                self.info.update({'sec_per_lower_step':(end - start)/self.info['total_lower_step']})
         
+        mem =  get_mem_stats()
+        self.info.update(mem)
         self.logger.log_params(flatten(self.info))
-
-    def train_simu(self):
-        '''
-        simultaneous training of network and pde parameter
-        '''
-        wloss_comp = {}
-        epoch = 0
-        
-        while True:
-
-            self.optimizer['allparam'].zero_grad()
-            self.lossCollection.getloss()
-
-            loss_net = self.lossCollection.get_wloss_sum(self.loss_net)
-            loss_pde = self.lossCollection.get_wloss_sum(self.loss_pde)
-            
-            wloss_comp.update(self.lossCollection.wloss_comp)
-            wloss_comp['lowertot'] = loss_net
-
-            # monitor total loss
-            stophere = self.estop(self.lossCollection.wtotal, self.net.params_dict, epoch)
-
-            # print statistics at interval or at stop
-            if epoch % self.opts['print_every'] == 0 or stophere:
-                self.log_stat(wloss_comp, epoch)
-                val = self.pde.validate(self.net)
-                self.log_stat(val, epoch)
-            if stophere:
-                break
-            
-            # take gradient of data loss w.r.t pde parameter
-            # self.set_grad(self.net.param_pde, self.lossCollection.wloss_comp['data'])
-            self.set_pde_param_grad(loss_pde)
-            
-            # take gradient of residual loss w.r.t network parameter
-            self.set_grad(self.net.param_net, loss_net)
-
-            # 1 step of GD
-            self.optimizer['allparam'].step()
-            self.scheduler.step()
-            epoch += 1
-
-    
-    def train_bilevel_singleopt(self):
-        # single optimizer for all parameters, change learning rate manually
-
-        def log_stat(wloss_comp, islower, epoch):
-            # log statistics
-            if epoch % self.opts['print_every'] == 0 or stophere:
-                self.logger.log_metrics(wloss_comp, step=epoch)
-                self.logger.log_metrics(self.net.params_dict, step=epoch)
-                self.logger.log_metrics({'lower':islower}, step=epoch)
-        epoch = 0
-        wloss_comp = {}
-        
-        while True:
-
-            self.optimizer['allparam'].zero_grad()
-            self.lossCollection.getloss()
-
-            loss_lower = self.lossCollection.get_wloss_sum(self.loss_net)
-            loss_upper = self.lossCollection.wloss_comp['data']
-
-            wloss_comp.update(self.lossCollection.wloss_comp)
-
-            wloss_comp['lowertot'] = loss_lower
-            wloss_comp['uppertot'] = loss_upper
-
-            # check early stopping
-            stophere = self.estop(wloss_comp['total'], self.net.params_dict, epoch)
-
-            log_stat(wloss_comp, 0, epoch)
-
-
-            if stophere:
-                break  
-
-
-            ### lower level
-            epoch_lower = 0
-            while loss_lower > self.opts['tol_lower']:
-                # set second group learning rate to 0
-                self.optimizer['allparam'].param_groups[1]['lr'] = 0.0
-
-                # take gradient of residual loss w.r.t network parameter
-                self.set_grad(self.net.param_net, loss_lower)
-                self.optimizer['allparam'].step()
-
-                epoch_lower += 1
-                epoch += 1
-
-                if epoch_lower == self.opts['max_iter_lower']:
-                    break
-                    
-                # compute lower level loss
-                self.optimizer['allparam'].zero_grad()
-                self.lossCollection.getloss()
-                wloss_comp.update(self.lossCollection.wloss_comp)
-
-                loss_lower = self.lossCollection.get_wloss_sum(self.loss_net)
-                wloss_comp['lowertot'] = loss_lower
-
-                log_stat(wloss_comp, 1, epoch)
-                val = self.pde.validate(self.net)
-                self.log_stat(val, epoch)
-            ### end of lower level
-
-            if epoch_lower > 0:
-                # redo upper level loss, since lower level has changed the network
-                self.optimizer['allparam'].zero_grad()
-
-                # reset learning rate
-                self.optimizer['allparam'].param_groups[1]['lr'] = self.opts['lr_pde']
-                self.lossCollection.getloss()
-                wloss_comp.update(self.lossCollection.wloss_comp)
-                
-                loss_upper = self.lossCollection.wloss_comp['data']
-                wloss_comp['uppertot'] = loss_upper
-                
-                loss_lower = self.lossCollection.get_wloss_sum(self.loss_net)
-                wloss_comp['lowertot'] = loss_lower
-                
-                log_stat(wloss_comp, 0, epoch)
-                val = self.pde.validate(self.net)
-                self.log_stat(val, epoch)
-
-            # take gradient of data loss w.r.t pde parameter
-            self.set_pde_param_grad(self.lossCollection.wloss_comp['data'])
-            
-            # take gradient of residual loss w.r.t network parameter
-            loss_lower = self.lossCollection.get_wloss_sum(self.loss_net)
-
-            self.set_grad(self.net.param_net, loss_lower)
-            
-            # 1 step of GD for all net+pde params
-            self.optimizer['allparam'].step()
-            self.scheduler.step() # only step for allparam
-            # next cycle
-            epoch += 1
-
-    def train_vanilla(self):
-        '''
-        vanilla training of network, update all parameters simultaneously
-        '''
-
-        epoch = 0
-        while True:
-
-            self.optimizer['allparam'].zero_grad()
-            self.lossCollection.getloss()
-            # check early stopping
-            stophere = self.estop(self.lossCollection.wtotal, self.net.params_dict, epoch)
-
-            # print statistics at interval or at stop
-            if epoch % self.opts['print_every'] == 0 or stophere:
-                val = self.pde.validate(self.net)
-                self.logger.log_metrics(val, epoch)
-                self.log_stat(self.lossCollection.wloss_comp, epoch)
-            if stophere:
-                break  
-
-            self.lossCollection.wtotal.backward(retain_graph=True)
-            self.optimizer['allparam'].step()
-            self.scheduler.step()
-            # next cycle
-            epoch += 1
-
 
     def save_optimizer(self):
         # save optimizer
-        traintype = self.traintype
 
         for key in self.optimizer.keys():
             fname = f"optimizer_{key}.pth"
@@ -327,7 +187,6 @@ class Trainer:
     
     def restore_optimizer(self, dirname):
         # restore optimizer, need dirname
-        traintype = self.traintype
         if self.opts['reset_optim']:
             print('do not restore optimizer, reset optimizer to default')
             return
@@ -336,17 +195,6 @@ class Trainer:
             fname = f"optimizer_{key}.pth"
             fpath = os.path.join(dirname, fname)
             self.load_optim(self.optimizer[key], fpath)
-            
-            
-            # adjust learning rate
-            # for allparam, first is net, second is pde
-            if key == 'allparam' and traintype.startswith('adj'):
-                lr_net = self.optimizer[key].param_groups[0]['lr']
-                lr_pde = self.optimizer[key].param_groups[1]['lr']
-                self.optimizer[key].param_groups[0]['lr'] = self.opts['lr_net']
-                self.optimizer[key].param_groups[1]['lr'] = self.opts['lr_pde']
-                print(f'adjust lr_net from {lr_net} to {self.opts["lr_net"]}')
-                print(f'adjust lr_pde from {lr_pde} to {self.opts["lr_pde"]}')
             
 
     def save_net(self):
@@ -357,7 +205,21 @@ class Trainer:
         print(f'save model to {net_path}')
 
     def restore_net(self, net_path):
-        self.net.load_state_dict(torch.load(net_path))
+        
+        state_dict = torch.load(net_path)
+
+        # set strict to False, to allow loading partial model for loRA
+        self.net.load_state_dict(state_dict, strict=False)
+
+        # if net pde param is different from prob.init_param, need to update
+        # with torch.no_grad():
+        #     for key, val in self.net.all_params_dict.items():
+        #         if key in self.pde.opts['init_param']:
+        #             new_val = self.pde.opts['init_param'][key]
+        #             print(f'update pde parameter {key} from {val} to {new_val}')
+        #             tensor = torch.tensor([[new_val]], dtype=val.dtype, device=val.device)
+        #             self.net.all_params_dict[key].data = tensor
+
         print(f'restore model from {net_path}')
 
     def save_dataset(self):
@@ -369,13 +231,13 @@ class Trainer:
 
     def save(self):
         '''saving dir from logger'''
-        # save optimizer
-        self.save_dataset()
 
         # if max_iter is 0, do not save optimizer and net
         if self.opts['max_iter']>0:
             self.save_optimizer()
             self.save_net()
+        # save optimizer
+        self.save_dataset()
 
     def restore(self, dirname):
         # restore optimizer and network
@@ -384,55 +246,297 @@ class Trainer:
         fnet = os.path.join(dirname, 'net.pth')
         self.restore_net(fnet)
 
-# simple test on training routine
-# if __name__ == "__main__":
+    @abc.abstractmethod
+    def train_loop(self):
+        # training loop
+        pass
 
-#     optobj = Options()
-#     # change default for testing
-#     optobj.opts['flags'] = 'smallrun,local'
-#     optobj.opts['pde_opts']['problem'] = 'poisson'
 
-#     optobj.parse_args(*sys.argv[1:])
+class BiLevelTrainer(Trainer):
 
-     
-#     device = set_device('cuda')
-#     set_seed(0)
+    def __init__(self, *args):
+        super().__init__(*args)
 
-#     # setup pde
-#     pde = create_pde_problem(**(optobj.opts['pde_opts']),datafile=optobj.opts['dataset_opts']['datafile'])
-#     pde.print_info()
+        # optimizer and scheduler for lower level
+        optimizer_net = optimizer_dictionary[self.opts['optim_net']]
+        optim_net_opts = self.opts['opts_net']
+        self.optimizer['param_net'] = optimizer_net(self.net.param_net, lr=self.opts['lr_net'], **optim_net_opts)
 
-#     # setup logger
-#     logger = Logger(optobj.opts['logger_opts']) 
+        scheduler_net = getattr(optim.lr_scheduler, self.opts['sch_net'])
+        self.scheduler['param_net'] = scheduler_net(self.optimizer['param_net'], **self.opts['schopt_net'])
 
-#     # setup dataset
-#     dataset = create_dataset_from_pde(pde, optobj.opts['dataset_opts'])
+        # optimizer and scheduler for upper level
+        optimizer_pde = optimizer_dictionary[self.opts['optim_pde']]
+        optim_pde_opts = self.opts['opts_pde']
+        self.optimizer['param_pde'] = optimizer_pde(self.net.param_pde_trainable, lr=self.opts['lr_pde'], **optim_pde_opts)
+        
+        # setup learning rate scheduler
+        scheduler_pde = getattr(optim.lr_scheduler, self.opts['sch_pde'])
+        self.scheduler['param_pde'] = scheduler_pde(self.optimizer['param_pde'], **self.opts['schopt_pde'])
 
-#     # setup network
-#     net = DenseNet(**optobj.opts['nn_opts'],
-#                                 output_transform=pde.output_transform,
-#                                 params_dict=pde.param)
 
+    def train_loop(self):
+        # single optimizer for all parameters, change learning rate manuall
+        
     
-#     # set up los
-#     lc = lossCollection(net, pde, optobj.opts['weights'])
+        def get_lower_loss(yes_grad = True):
+            # self.optimizer['param_net'].zero_grad()
+            weighted_sum, weighted_loss_comp, unweighted_loss_comp = self.lossCollection.get_wloss_sum_comp(self.loss_net, yes_grad)
+            return weighted_sum, weighted_loss_comp, unweighted_loss_comp
+        
+        def step_lower(loss_lower):
+            self.set_grad(self.net.param_net, loss_lower)
+            self.optimizer['param_net'].step()
+            self.scheduler['param_net'].step()
+        
+        def get_upper_loss(yes_grad = True):
+            # self.optimizer['param_pde'].zero_grad()
+            # should always compute gradient, even for validation, because residual loss or l2grad need gradient
+            weighted_sum, weighted_loss_comp, unweighted_loss_comp = self.lossCollection.get_wloss_sum_comp(self.loss_pde, yes_grad)
+            return weighted_sum, weighted_loss_comp, unweighted_loss_comp
 
-#     print_dict(optobj.opts)
-#     ### basic
+        def step_upper(loss_upper):
+            self.set_grad(self.net.param_pde_trainable, loss_upper)
+            self.optimizer['param_pde'].step()
+            self.scheduler['param_pde'].step()
+        
+        epoch = 0
+
+        w_upper = 0.0
+        w_upper_comp = {}
+        uw_upper_comp = {}
+        
+        w_upper, w_upper_comp, uw_upper_comp = get_upper_loss(True)
+        
+        # zero grad for all parameters
+        self.optimizer['param_net'].zero_grad()
+        self.optimizer['param_pde'].zero_grad()
+
+        while True:
+            at_lower = 0
+
+            w_lower, w_lower_comp, uw_lower_comp = get_lower_loss(True)
+
+            # collect samples at upper level for pde
+            # do it every step at upper level
+            self.pde.collect_samples(self.net)
+            
+            # check early stopping
+            # if skip_upper, only monitor lower loss, otherwise monitor upper loss
+            loss_to_monitor = w_upper
+            stophere = self.estop(epoch, loss_to_monitor)
+
+            # for component, log unweighted loss, for total, log weighted loss
+            self.log_stat(epoch, stophere, **uw_lower_comp, **uw_upper_comp, lower=at_lower, lowertot=w_lower, uppertot=w_upper)
+            self.validate(epoch, stophere)
+
+            if stophere:
+                self.log_stat(epoch, stophere, **uw_lower_comp, **uw_upper_comp, lower=at_lower, lowertot=w_lower, uppertot=w_upper)
+                break  
+                
+            
+            ### lower level
+            epoch_lower = 0
+            while w_lower > self.opts['tol_lower']:
+                
+                at_lower = 1
+
+                self.acc_grad(self.net.param_net, w_lower)
+                if epoch % self.opts['acc_iter'] == 0:
+                    self.optimizer['param_net'].step()
+                    self.scheduler['param_net'].step()
+                    self.optimizer['param_net'].zero_grad()
+
+                epoch_lower += 1
+                epoch += 1
+
+                w_lower, w_lower_comp, uw_lower_comp = get_lower_loss(True)
+                w_upper, w_upper_comp, uw_upper_comp = get_upper_loss(True)
+
+                self.log_stat(epoch, stophere, **uw_lower_comp, **uw_upper_comp, lower=at_lower, lowertot=w_lower, uppertot=w_upper)
+                self.validate(epoch, stophere)
+
+                # get next batch
+                self.pde.dataset.next_batch()
+
+                if epoch_lower == self.opts['max_iter_lower']:
+                    break
+            ### end of lower level
+
+            at_lower = 0
+
+            
+            
+            if self.opts['simu_update']:
+                # simulaneous update
+                # need to compute upper before stepping lower
+                w_upper, w_upper_comp, uw_upper_comp = get_upper_loss(True)
+                self.acc_grad(self.net.param_pde_trainable, w_upper)
+
+                # step lower
+                self.acc_grad(self.net.param_net, w_lower)
+
+                # when to step accumulate gradient
+                if epoch % self.opts['acc_iter'] == 0:
+                    self.optimizer['param_net'].step()
+                    self.scheduler['param_net'].step()
+                    self.optimizer['param_net'].zero_grad()
+                    # then step upper
+                    self.optimizer['param_pde'].step()
+                    self.scheduler['param_pde'].step()
+                    self.optimizer['param_pde'].zero_grad()
+            else:
+                # rase error
+                raise NotImplementedError('alternating update not implemented')
+            
+            self.pde.dataset.next_batch()
+            epoch += 1
+            # next cycle
+
+
+class SingleLevelTrainer(Trainer):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        # name for optimizer and scheduler
+        self.group_name = None
+        # list of loss to monitor
+        self.which_loss = None
+
+    def train_loop(self):
+        '''
+        vanilla training of network, update all parameters simultaneously
+        '''
+        epoch = 0
+        
+        group_name = self.group_name
+
+        while True:
+
+            self.optimizer[group_name].zero_grad()
+            
+            wtotal, wloss_comp, uwloss_comp = self.lossCollection.get_wloss_sum_comp(self.which_loss, True)
+
+            # if self.loss_monitor is non-empty, monitor the loss
+            if self.loss_monitor:
+                wmonitor = 0.0
+                for key in self.loss_monitor:
+                    wmonitor += wloss_comp[key]
+            else:
+                wmonitor = wtotal
+
+            # check early stopping
+            stophere = self.estop( epoch, wmonitor)
+
+            # print statistics at interval or at stop
+            self.log_stat(epoch, stophere, **uwloss_comp, total=wtotal)
+            self.validate(epoch, stophere)
+
+            if stophere:
+                break  
+
+            # take gradient of residual loss w.r.t all parameters
+            # do not use setgrad here. if vanilla init, pde_param requires grad = False
+            wtotal.backward()
+            self.optimizer[group_name].step()
+            self.scheduler[group_name].step()
+            # next cycle
+            self.pde.dataset.next_batch()
+            if epoch % self.opts['print_every'] == 0 or stophere:
+                self.pde.collect_samples(self.net)
+            epoch += 1
+
+
+class PinnTrainer(SingleLevelTrainer):
     
-#     trainer = Trainer(optobj.opts['train_opts'], net, pde, lc, logger)
+    def __init__(self, *args):
+        super().__init__(*args)
+
+        optimizer = optimizer_dictionary[self.opts['optim_net']]
+        optim_options = self.opts['opts_net']
+
+        # param_all include all parameters, including requires_grad = False (some pde parameter and embedding)
+        self.optimizer['param_net'] = optimizer(self.net.param_all, lr=self.opts['lr_net'], **optim_options)
+        
+        scheduler_net = getattr(optim.lr_scheduler, self.opts['sch_net'])
+        self.scheduler['param_net'] = scheduler_net(self.optimizer['param_net'], **self.opts['schopt_net'])
+        
+        self.which_loss = self.opts['loss_net']
+        self.group_name = 'param_net'
+
+class OperatorPretrainTrainer(SingleLevelTrainer):
     
-#     trainer.config_train(optobj.opts['traintype'])
+    def __init__(self, *args):
+        super().__init__(*args)
 
-#     if optobj.opts['restore']:
-#         trainer.restore(optobj.opts['restore'])
+        optimizer = optimizer_dictionary[self.opts['optim']]
+        optim_options = self.opts['opts']
 
-#     trainer.train()
+        # param_all include all parameters, including requires_grad = False (some pde parameter and embedding)
+        self.optimizer['param_net'] = optimizer(self.net.parameters(), lr=self.opts['lr'], **optim_options)
+        
+        scheduler_net = getattr(optim.lr_scheduler, self.opts['sch'])
+        self.scheduler['param_net'] = scheduler_net(self.optimizer['param_net'], **self.opts['schopt'])
+        
+        self.which_loss = self.opts['loss_net']
+        self.group_name = 'param_net'
 
-#     trainer.save()
+class OperatorInverseTrainer(SingleLevelTrainer):
+    
+    def __init__(self, *args):
+        super().__init__(*args)
 
+        # set all parameter untrainable
+        for param in self.net.parameters():
+            param.requires_grad = False
+        # set pde_param trainable
+        self.net.pde_param.requires_grad = True
 
+        optimizer = optimizer_dictionary[self.opts['optim']]
+        optim_options = self.opts['opts']
+        self.optimizer['param_net'] = optimizer([self.net.pde_param], lr=self.opts['lr'], **optim_options)
+        
+        scheduler_net = getattr(optim.lr_scheduler, self.opts['sch'])
+        self.scheduler['param_net'] = scheduler_net(self.optimizer['param_net'], **self.opts['schopt'])
+        
+        self.which_loss = self.opts['loss_net']
+        self.group_name = 'param_net'
 
+        
+class BiloInitTrainer(SingleLevelTrainer):
+    def __init__(self, *args):
+        super().__init__(*args)
 
+        optimizer = optimizer_dictionary[self.opts['optim_net']]
+        optim_options = self.opts['opts_net']
+        # param_all include all parameters, including requires_grad = False (some pde parameter and embedding)
+        trainable_param = self.net.param_net
 
+        # for initialization. 
+        # 1. Scalar case, param not trainable
+        # 2. Function case, param trainable
+        # wanring: not handling cases inferring both scalar and function
+        if self.net.with_func:
+            trainable_param += self.net.param_pde
 
+        self.optimizer['param_net'] = optimizer(trainable_param, lr=self.opts['lr_net'], **optim_options)
+        
+        scheduler_net = getattr(optim.lr_scheduler, self.opts['sch_net'])
+        self.scheduler['param_net'] = scheduler_net(self.optimizer['param_net'], **self.opts['schopt_net'])
+
+        self.which_loss = self.opts['loss_net']
+        self.group_name = 'param_net'
+
+class UpperTrainer(SingleLevelTrainer):
+    def __init__(self, *args):
+        super().__init__(*args)
+
+        optimizer = optimizer_dictionary[self.opts['optim_pde']]
+        optim_options = self.opts['opts_pde']
+        
+        self.optimizer['param_pde'] = optimizer(self.net.param_pde_trainable, lr=self.opts['lr_pde'], **optim_options)
+        scheduler_pde = getattr(optim.lr_scheduler, self.opts['sch_pde'])
+        self.scheduler['param_pde'] = scheduler_pde(self.optimizer['param_pde'], **self.opts['schopt_pde'])
+        
+        self.which_loss = self.opts['loss_pde']
+        self.group_name = 'param_pde'

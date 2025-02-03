@@ -4,10 +4,11 @@ newruns/
 *.png
 fig*/
 runs/
-tmp/
+tmp*/
 dataset/
 PyTorch_LBFGS/
 __pycache__/
 torchnotes/
-bashscripts/
-
+*.sh
+*.yaml
+Langevin-dynamics/

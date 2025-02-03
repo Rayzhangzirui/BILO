@@ -9,7 +9,7 @@ from matplotlib import pyplot as plt
 from util import generate_grf, griddata_subsample
 
 from BaseProblem import BaseProblem
-from DataSet import DataSet
+from MatDataset import MatDataset
 from DenseNet import DenseNet, ParamFunction
 
 class DarcyDenseNet(DenseNet):
@@ -106,7 +106,7 @@ class DarcyProblem(BaseProblem):
         self.output_dim = 1
         self.opts=kwargs
 
-        self.dataset = DataSet(kwargs['datafile'])
+        self.dataset = MatDataset(kwargs['datafile'])
         self.testcase = kwargs['testcase']
 
     def residual(self, nn, X):
@@ -295,7 +295,7 @@ class DarcyProblem(BaseProblem):
             x = self.dataset['X_dat_train'][:,1:2]
             noise = torch.zeros_like(self.dataset['u_dat_train'])
     
-            tmp = generate_grf(x, noise_opts['variance'], noise_opts['length_scale'])
+            tmp = generate_grf(x, noise_opts['std'], noise_opts['length_scale'])
             noise[:,0] = tmp.squeeze()
 
             self.dataset['noise'] = noise

@@ -1,23 +1,32 @@
 #!/usr/bin/env python
-from torchinfo import summary
-import torch
-import torch.nn as nn
-import torch.optim as optim
 import os
-
-import mlflow
-
+from torchinfo import summary
 
 from Options import *
 from util import *
-
-
-from MlflowHelper import load_artifact
 from Problems import create_pde_problem
 from lossCollection import lossCollection
 
 from Logger import Logger
-from Trainer import Trainer
+from Trainer import *
+
+def get_trainer(traintype):
+    network, method = traintype.split('-')
+
+    if network == 'pinn':
+        return PinnTrainer
+    elif network in {'fno', 'deeponet'}:
+        if method == 'inv':
+            return OperatorInverseTrainer
+        elif method == 'init':
+            return OperatorPretrainTrainer
+    elif network == 'bilo':
+        if method == 'simu':
+            return BiLevelTrainer
+        elif method == 'init':
+            return BiloInitTrainer
+    else:
+        raise ValueError('trainer not found')
 
 class Engine:
     def __init__(self, opts=None) -> None:
@@ -39,20 +48,24 @@ class Engine:
     def setup_problem(self):
         # setup pde problem
         self.pde = create_pde_problem(self.opts['pde_opts'])
+        self.pde.config_traintype(self.opts['traintype'])
         
-        self.pde.setup_dataset(self.opts['dataset_opts'], self.opts['noise_opts'])
+        self.pde.setup_dataset(self.opts['dataset_opts'], self.opts['noise_opts'], self.device)
         
         self.net = self.pde.setup_network(**self.opts['nn_opts'])
 
     def restore_opts(self, restore_opts):
-        ''' restore options from a previous run, and update with new options
+        ''' only restore neural network options, other options are from command line or default
         '''
-        self.opts['nn_opts'].update(restore_opts['nn_opts'])
+        # self.opts['nn_opts'].update(restore_opts['nn_opts'])
+        do_not_restore = ['rff_trainable','train_embed','rank']
+        for key in restore_opts['nn_opts']:
+            if key in do_not_restore:
+                continue
+            self.opts['nn_opts'][key] = restore_opts['nn_opts'][key]
         
-        
-
     def restore_run(self):
-        # actual restore is called in setup_lossCollection, need to known collection of trainable parameters
+        # if restore is empty, do nothing
         if self.opts['restore'] != '':
             # if is director
             if os.path.isdir(self.opts['restore']):
@@ -67,16 +80,18 @@ class Engine:
                 #  restore from exp_name:run_name
                 self.restore_artifacts = self.logger.load_artifact(name_str=self.opts['restore'])
                 restore_opts = read_json(self.restore_artifacts['options.json'])
+                print(f'restore from {self.opts["restore"]}')
         
             self.restore_opts(restore_opts)
+        else:
+            print('no restore')
     
-        
-
     def setup_trainer(self):
-        self.lossCollection = lossCollection(self.net, self.pde, self.opts['weights'], self.opts['loss_opts'])
-        self.trainer = Trainer(self.opts['train_opts'], self.net, self.pde, self.device, self.lossCollection, self.logger)
-        self.trainer.config_train(self.opts['traintype'], self.opts['scheduler_opts'])
+        self.lossCollection = lossCollection(self.net, self.pde, self.opts['weights'], self.opts['weight_as_sigma'])
 
+        trainerClass = get_trainer(self.opts['traintype'])
+        self.trainer = trainerClass(self.opts['train_opts'], self.net, self.pde, self.device, self.lossCollection, self.logger)
+        
         if self.restore_artifacts:
             self.trainer.restore(self.restore_artifacts['artifacts_dir'])
         else:

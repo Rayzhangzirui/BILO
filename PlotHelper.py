@@ -10,21 +10,9 @@ from util import *
 
 from DenseNet import *
 from MlflowHelper import MlflowHelper
-from DataSet import DataSet
+from MatDataset import MatDataset
 from Problems import *
 
-
-DEBUG = True
-def catch_plot_errors(func):
-    def wrapper(*args, **kwargs):
-        try:
-            return func(*args, **kwargs)
-        except Exception as e:
-            if DEBUG:
-                raise
-            else:
-                print(f"An error occurred while plotting: {e}")
-    return wrapper
 
 class PlotHelper:
     def __init__(self, pde, dataset, **kwargs) -> None:
@@ -42,7 +30,7 @@ class PlotHelper:
         
         self.pde.visualize(net, savedir=self.opts['save_dir'])
 
-    @catch_plot_errors
+    
     def plot_variation(self, net):
         # plot variation of net w.r.t each parameter
         
@@ -54,11 +42,11 @@ class PlotHelper:
             u_test = net(x_test)
         
 
-        # for each net.params_dict, plot the solution and variation
-        for k, v in net.params_dict.items():
+        # for each net.pde_params_dict, plot the solution and variation
+        for k, v in net.pde_params_dict.items():
             fig, ax = plt.subplots()
             
-            param_value = net.params_dict[k].item()
+            param_value = net.pde_params_dict[k].item()
             param_name = k
 
             deltas = [0.0, 0.1, -0.1]
@@ -67,14 +55,14 @@ class PlotHelper:
                 new_value = param_value + delta
                 # replace parameter
                 with torch.no_grad():
-                    net.params_dict[param_name].data = torch.tensor([[new_value]]).to(device)
+                    net.pde_params_dict[param_name].data = torch.tensor([[new_value]]).to(device)
                 
                 u_test = net(x_test)
                 ax.plot(x_test.cpu().numpy(), u_test.cpu().detach().numpy(), label=f'NN {param_name} = {new_value:.2e}')
 
                 if 'exact' in self.pde.tag:
                     # plot exact solution
-                    u_exact_test = self.pde.u_exact(x_test, net.params_dict)
+                    u_exact_test = self.pde.u_exact(x_test, net.pde_params_dict)
                     # get the color of previous line
                     color = ax.lines[-1].get_color()
                     ax.plot(x_test.cpu().numpy(), u_exact_test.cpu().detach().numpy(), label=f'exact {param_name} = {new_value:.2e}',color=color,linestyle='--')
@@ -93,7 +81,7 @@ class PlotHelper:
         fig.savefig(fpath, dpi=300, bbox_inches='tight')
         print(f'{fname} saved to {fpath}')
      
-    @catch_plot_errors
+    
     def plot_prediction(self, net):
         x_dat_test = self.dataset['x_dat_test']
         u_dat_test = self.dataset['u_dat_test']
@@ -110,7 +98,7 @@ class PlotHelper:
         u_dat_train = self.dataset['u_dat_train'].cpu().detach().numpy()
 
         if 'ode' in self.pde.tag:
-            sol = self.pde.solve_ode(to_double(net.params_dict))
+            sol = self.pde.solve_ode(to_double(net.pde_params_dict))
         
 
         # visualize the results
@@ -138,7 +126,7 @@ class PlotHelper:
         return fig, ax
     
 
-    @catch_plot_errors
+    
     def plot_prediction_2dtraj(self, net, dataset):
         x_dat_test = self.dataset['x_dat_test']
         u_dat_test = self.dataset['u_dat_test']
@@ -160,7 +148,7 @@ class PlotHelper:
 
         if 'ode' in self.pde.tag:
             # plo solution with inferred parameters
-            sol = self.pde.solve_ode(to_double(net.params_dict))
+            sol = self.pde.solve_ode(to_double(net.pde_params_dict))
             ax.plot(sol.y[0], sol.y[1], label='sol inf param',linestyle=':')
         
         ax.legend()
@@ -170,7 +158,7 @@ class PlotHelper:
 
         return fig, ax
     
-    @catch_plot_errors
+    
     def plot_loss(self, hist, loss_names=None):
         # plot loss history
         fig, ax = plt.subplots()
@@ -207,7 +195,7 @@ def output_svd(m1, m2, layer_name):
     _, s_diff, _ = torch.svd(W1 - W2)
     return s1, s2, s_diff
 
-@catch_plot_errors
+
 def plot_svd(s1, s2, s_diff, name1, name2, namediff):
     # sve plot, 
     # s1, s2, s_diff are the svd of the weight and svd of the difference
@@ -245,7 +233,7 @@ if __name__ == "__main__":
     nn.load_state_dict(torch.load(atf_dict['net.pth']))
 
     # load dataset
-    dataset = DataSet()
+    dataset = MatDataset()
     dataset.readmat(atf_dict['dataset.mat'])
 
 

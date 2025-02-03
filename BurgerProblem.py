@@ -7,116 +7,42 @@ import numpy as np
 from scipy.integrate import solve_ivp
 import matplotlib.pyplot as plt
 
-from util import generate_grf, add_noise,  griddata_subsample
+from util import generate_grf, add_noise,  griddata_subsample, error_logging_decorator
 
 from BaseProblem import BaseProblem
-from DataSet import DataSet
+from MatDataset import MatDataset
 from DenseNet import DenseNet, ParamFunction
 
-class HeatDenseNet(DenseNet):
+class BurgerDenseNet(DenseNet):
     ''' override the embedding function of DenseNet'''
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
-        fdepth = kwargs['fdepth']
-        fwidth = kwargs['fwidth']
-        activation = kwargs['activation']
-        output_activation = kwargs['output_activation']
-        
-        self.func_param = ParamFunction(fdepth=fdepth, fwidth=fwidth,
-                                        activation=activation, output_activation=output_activation,
-                                        output_transform=lambda x, u: u * x * (1.0 - x))
-        self.collect_trainable_param()
-
-
-    def setup_embedding_layers(self):
-
-        self.param_embeddings = nn.ModuleDict({'u0': nn.Linear(1, self.width, bias=False)})
-
-        # set requires_grad to False
-        for embedding_weights in self.param_embeddings.parameters():
-            embedding_weights.requires_grad = False
     
-    def output_transform(self, x, u):
+    def get_param_expand(self, x, pde_params_dict=None):
+        '''
+        get the embedding of the pde parameter
+        n is the size of the input x
+        '''
+        for name, param in pde_params_dict.items():
+            # expand the parameter to the same size as as n
+            if isinstance(param, torch.Tensor):
+                # might be x only for plotting variation
+                n = x.shape[0]
+                self.params_expand[name] = param.expand(n, -1)
+            elif isinstance(param, nn.Module):
+                # X = (t, x) is passed to the network
+                self.params_expand[name] = param(x[:, 1:2])
+            else:
+                raise ValueError(f'Unknown type for parameter {name}')
+    
+    def output_transform(self, x, u, param):
         # override the output transform attribute of DenseNet
-        if self.use_exact_u0 is True:
-            # only for testcase 0
-            u0 = torch.sin(torch.pi  * x[:, 1:2])
-        else:
-            u0 = self.params_expand['u0']
+        u0 = self.params_expand['u0']
 
         return u * x[:, 1:2] * (1 - x[:, 1:2]) * x[:, 0:1] + u0
 
-    def embed_x(self, x):
-        '''embed x to the input layer'''
-        if self.fourier:
-            x_embed = torch.sin(2 * torch.pi * self.fflayer(x))
-        x_embed = self.input_layer(x)
-        return x_embed
 
-    def embedding(self, x):
-        # override the embedding function
-        
-        # have to evaluate self.func_param(xcoord) inside the network
-        # otherwise self.func_param is not in the computation graph
-    
-        x_embed = self.embed_x(x)
-        x_coord = x[:, 1:2]
 
-        if self.with_param:
-            u0 = self.func_param(x_coord) #(n, 1) D at x_res_train
-            self.params_expand['u0'] = u0
-            y_embed = self.param_embeddings['u0'](u0)
-            x_embed += y_embed
-        else:
-            # if u(x), not function of unkown
-            self.params_expand['u0'] = self.func_param(x_coord)
-            
-        return x_embed
-
-    def embedding_to_u(self, X):
-        # X is the embedded input, linear combination of the "features"
-        Xtmp = self.act(X)
-        
-        for i, hidden_layer in enumerate(self.hidden_layers):
-            hidden_output = hidden_layer(Xtmp)
-            if self.use_resnet:
-                hidden_output += Xtmp  # ResNet connection
-            hidden_output = self.act(hidden_output)
-            Xtmp = hidden_output
-        
-        u = self.output_layer(Xtmp)
-        
-        return u
-
-    def forward(self, x):
-        
-        X = self.embedding(x)
-        
-        u = self.embedding_to_u(X)
-
-        u = self.output_transform(x, u)
-        return u
-    
-    def variation(self, x, z):
-        '''variation of u w.r.t u0
-        '''
-        # Need to update the params_expand['u0'] to z for both with_param=True and False
-        # 
-        self.params_expand['u0'] = z
-
-        if self.with_param:
-            x_embed = self.embed_x(x)
-            z_embed = self.param_embeddings['u0'](z)
-            X = x_embed + z_embed
-        else:
-            X = self.embed_x(x)
-
-        u = self.embedding_to_u(X)
-        u = self.output_transform(x, u)
-        return u
-
-  
 class BurgerProblem(BaseProblem):
     def __init__(self, **kwargs):
         super().__init__()
@@ -125,11 +51,13 @@ class BurgerProblem(BaseProblem):
         self.opts=kwargs
  
         self.testcase = kwargs['testcase']
-        self.use_exact_u0 = kwargs['use_exact_u0']
+
+        self.loss_dict['l2grad'] = self.get_l2grad
         
         self.param = {'u0': 0.0}
 
-        self.dataset = DataSet(kwargs['datafile'])
+
+        self.dataset = MatDataset(kwargs['datafile'])
         self.v = self.dataset['v']
     
     def residual(self, nn, X_in):
@@ -142,7 +70,7 @@ class BurgerProblem(BaseProblem):
         # Concatenate sliced tensors to form the input for the network
         X = torch.cat((t,x), dim=1)
 
-        u = nn(X)
+        u = nn(X, nn.pde_params_dict)
         
         u_t = torch.autograd.grad(u, t,
             create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(u))[0]
@@ -161,7 +89,7 @@ class BurgerProblem(BaseProblem):
     
     def get_data_loss(self, net):
         # get data loss
-        u_pred = net(self.dataset['X_dat_train'])
+        u_pred = net(self.dataset['X_dat_train'], net.pde_params_dict)
         loss = torch.mean(torch.square(u_pred - self.dataset['u_dat_train']))
         
         return loss
@@ -171,7 +99,7 @@ class BurgerProblem(BaseProblem):
         x = self.dataset['x_ic_train']
         x.requires_grad_(True)
         
-        D = net.func_param(x)
+        D = net.pde_params_dict['u0'](x)
         D_x = torch.autograd.grad(D, x,
             create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(D))[0]
         return torch.mean(torch.square(D_x))
@@ -181,17 +109,17 @@ class BurgerProblem(BaseProblem):
         kwargs['input_dim'] = self.input_dim
         kwargs['output_dim'] = self.output_dim
 
-        pde_param = self.param.copy()
-        init_param = self.opts['init_param']
-        if init_param is not None:
-            pde_param.update(init_param)
+        self.param_fun = ParamFunction(fdepth=kwargs['fdepth'], fwidth=kwargs['fwidth'],
+                                    fsiren=kwargs['fsiren'],
+                                    activation=kwargs['activation'], output_activation=kwargs['output_activation'],
+                                    output_transform=lambda x, u: u * x * (1.0 - x) )
+                
+        self.all_params_dict = {'u0': self.param_fun}
 
-        net = HeatDenseNet(**kwargs,
-                            params_dict=pde_param,
-                            trainable_param = self.opts['trainable_param'])
-
-        net.use_exact_u0 = self.use_exact_u0
-        net.setup_embedding_layers()
+        net = BurgerDenseNet(**kwargs,
+                        lambda_transform=self.lambda_transform,
+                        all_params_dict= self.all_params_dict,
+                        trainable_param = self.opts['trainable_param'])
         
         return net
 
@@ -268,7 +196,7 @@ class BurgerProblem(BaseProblem):
         
         dataset.printsummary()
 
-    def setup_dataset(self, dsopt, noise_opt):
+    def setup_dataset(self, dsopt, noise_opt, device='cuda'):
         '''add noise to dataset'''
         
         self.create_dataset_from_file(dsopt)
@@ -277,38 +205,41 @@ class BurgerProblem(BaseProblem):
 
         if noise_opt['use_noise']:
             x = self.dataset['X_dat_train'][:, 1]
-            noise = generate_grf(x, noise_opt['variance'], noise_opt['length_scale'])
+            noise = generate_grf(x, noise_opt['std'], noise_opt['length_scale'])
             self.dataset['noise'] = noise.reshape(-1, 1)
             self.dataset['u_dat_train'] = self.dataset['u_dat_train'] + self.dataset['noise']
+        
+        self.dataset.to_device(device)
     
     def func_mse(self, net):
         '''mean square error of variable parameter'''
         x = self.dataset['x_ic']
-        y = net.func_param(x)
+        y = net.pde_params_dict['u0'](x)
         return torch.mean(torch.square(y - self.dataset['u_ic']))
     
+    @torch.no_grad()
     def make_prediction(self, net):
         # make prediction at original X_dat and X_res
-        with torch.no_grad():
-            self.dataset['upred_res'] = net(self.dataset['X_res'])
-            self.dataset['upred_dat'] = net(self.dataset['X_dat'])
-            self.dataset['upred_ic'] = net.func_param(self.dataset['x_ic'])
+        self.dataset['upred_res'] = net(self.dataset['X_res'], net.pde_params_dict)
+        self.dataset['upred_dat'] = net(self.dataset['X_dat'], net.pde_params_dict)
+        self.dataset['upred_ic'] = net.pde_params_dict['u0'](self.dataset['x_ic'])
         
         self.prediction_variation(net)
 
-    def validate(self, nn):
+    @torch.no_grad()
+    def validate(self, net):
         '''compute l2 error and linf error of inferred D(x)'''
         
         x  = self.dataset['x_ic']
         u0_exact = self.dataset['u_ic']
-        with torch.no_grad():
-            u0_pred = nn.func_param(x)
-            err = u0_exact - u0_pred
-            l2norm = torch.mean(torch.square(err))
-            linfnorm = torch.max(torch.abs(err)) 
+        u0_pred = net.pde_params_dict['u0'](x)
+        err = u0_exact - u0_pred
+        l2norm = torch.mean(torch.square(err))
+        linfnorm = torch.max(torch.abs(err)) 
         
         return {'l2err': l2norm.item(), 'linferr': linfnorm.item()}
 
+    @error_logging_decorator
     def plot_upred_dat(self, savedir=None):
         fig, ax = plt.subplots()
         x = self.dataset['X_dat'][:, 1]
@@ -323,16 +254,21 @@ class BurgerProblem(BaseProblem):
             plt.savefig(path, dpi=300, bbox_inches='tight')
             print(f'fig saved to {path}')
     
+    @error_logging_decorator
     def plot_upred_res_meshgrid(self, savedir=None):
         # plot u at X_res, 
         
         u = self.dataset['u_res']
         u_pred = self.dataset['upred_res']
-        
+        # length of u_pred
+        n = u_pred.shape[0]
+
+        nx = int(np.sqrt(n))
+        ny = nx
         
         # reshape to 2D
-        u = u.reshape(1001, 1001)
-        u_pred = u_pred.reshape(1001, 1001)
+        u = u.reshape(nx, ny)
+        u_pred = u_pred.reshape(nx, ny)
         err = u - u_pred
 
         fig, ax = plt.subplots(1, 3, figsize=(15, 5))
@@ -356,7 +292,7 @@ class BurgerProblem(BaseProblem):
             plt.savefig(path, dpi=300, bbox_inches='tight')
             print(f'fig saved to {path}')
     
-
+    @error_logging_decorator
     def plot_upred_res(self, savedir=None):
         # plot u at X_res,         
         u = self.dataset['u_res']
@@ -389,7 +325,7 @@ class BurgerProblem(BaseProblem):
             print(f'fig saved to {path}')
     
 
-    
+    @error_logging_decorator
     def plot_ic_pred(self, savedir=None):
         ''' plot predicted d and exact d'''
         fig, ax = plt.subplots()
@@ -401,6 +337,7 @@ class BurgerProblem(BaseProblem):
             plt.savefig(path, dpi=300, bbox_inches='tight')
             print(f'fig saved to {path}')
     
+    @error_logging_decorator
     def plot_sample(self, savedir=None):
         '''plot distribution of collocation points'''
         fig, ax = plt.subplots()
@@ -419,6 +356,7 @@ class BurgerProblem(BaseProblem):
             plt.savefig(path, dpi=300, bbox_inches='tight')
             print(f'fig saved to {path}')
 
+    @torch.no_grad()
     def prediction_variation(self, net):
         # make prediction with different parameters
         X = self.dataset['X_dat']
@@ -432,15 +370,16 @@ class BurgerProblem(BaseProblem):
 
         for funkey, fun in funs.items():
             # replace parameter
-            with torch.no_grad():
-                z = fun(X[:, 1:2])
-                u = net.variation(X, z )
+            
+            z = fun(X[:, 1:2])
+            u = net(X, {'u0':z})
                 
             key = f'uvar_{funkey}_dat'
             var = f'icvar_{funkey}_dat'
             self.dataset[key] = u
             self.dataset[var] = z
     
+    @error_logging_decorator
     def plot_variation(self, savedir=None):
         # go through uvar and var
         def get_funkey(key):

@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 # # define problems for PDE
 import torch
-from DataSet import DataSet
+from MatDataset import MatDataset
 import numpy as np
 from matplotlib import pyplot as plt
 import os
-from util import generate_grf, griddata_subsample
+from util import generate_grf, griddata_subsample, error_logging_decorator
 from BaseProblem import BaseProblem
     
 class FKproblem(BaseProblem):
@@ -15,15 +15,14 @@ class FKproblem(BaseProblem):
         self.output_dim = 1
         self.opts=kwargs
 
-        self.dataset = DataSet(kwargs['datafile'])
-        self.D = self.dataset['D']
-        self.RHO = self.dataset['RHO']
+        self.dataset = MatDataset(kwargs['datafile'])
 
         self.testcase = kwargs['testcase']
-        
-        self.param = {}
-        self.param['rD'] = self.dataset[f'rD{self.testcase}']
-        self.param['rRHO'] = self.dataset[f'rRHO{self.testcase}']
+        self.D = self.dataset['D']
+        self.RHO = self.dataset['RHO']
+        self.all_params_dict = {}
+        self.all_params_dict['rD'] = self.dataset[f'rD{self.testcase}']
+        self.all_params_dict['rRHO'] = self.dataset[f'rRHO{self.testcase}']
 
         # use residual point for data loss
         self.dat_use_res = kwargs['dat_use_res']
@@ -31,9 +30,9 @@ class FKproblem(BaseProblem):
         # ic, u(x) = 0.5*sin(pi*x)^2
         # bc, u(t,0) = 0, u(t,1) = 0
         # transform: u(x,t) = u0(x) + u_NN(x,t) * x * (1-x) * t
-        self.lambda_transform = lambda X, u: (0.5 * torch.sin(np.pi * X[:,1:2]) ** 2)+ u * X[:,1:2] * (1 - X[:,1:2]) * X[:,0:1]
+        self.lambda_transform = lambda X, u, param: (0.5 * torch.sin(np.pi * X[:,1:2]) ** 2)+ u * X[:,1:2] * (1 - X[:,1:2]) * X[:,0:1]
 
-
+    
 
     def residual(self, nn, X):
         X.requires_grad_(True)
@@ -45,7 +44,7 @@ class FKproblem(BaseProblem):
         nn_input = torch.cat((t,x), dim=1)
 
         # Forward pass through the network
-        u_pred = nn(nn_input, nn.params_dict)
+        u_pred = nn(nn_input, nn.pde_params_dict)
 
         # Define a tensor of ones for grad_outputs
         v = torch.ones_like(u_pred)
@@ -71,7 +70,7 @@ class FKproblem(BaseProblem):
     
     def get_data_loss(self, net):
         # get data loss
-        u_pred = net(self.dataset['X_dat_train'],net.params_dict)
+        u_pred = net(self.dataset['X_dat_train'],net.pde_params_dict)
         loss = torch.mean(torch.square(u_pred - self.dataset['u_dat_train']))
         return loss
     
@@ -93,13 +92,14 @@ class FKproblem(BaseProblem):
         x_res_train = self.dataset['X_res_train']
         
         with torch.no_grad():
-            self.dataset['upred_dat'] = net(x_dat, net.params_dict)
-            self.dataset['upred_res'] = net(x_res, net.params_dict)
-            self.dataset['upred_dat_train'] = net(x_dat_train, net.params_dict)
-            self.dataset['upred_res_train'] = net(x_res_train, net.params_dict)
+            self.dataset['upred_dat'] = net(x_dat, net.pde_params_dict)
+            self.dataset['upred_res'] = net(x_res, net.pde_params_dict)
+            self.dataset['upred_dat_train'] = net(x_dat_train, net.pde_params_dict)
+            self.dataset['upred_res_train'] = net(x_res_train, net.pde_params_dict)
         
         self.prediction_variation(net)
-        
+    
+    @error_logging_decorator
     def plot_scatter(self, X, u, fname = 'fig_scatter.png', savedir=None):
         ''' plot u vs x, color is t'''
         x = X[:,1]
@@ -115,17 +115,18 @@ class FKproblem(BaseProblem):
             fpath = os.path.join(savedir, fname)
             fig.savefig(fpath, dpi=300, bbox_inches='tight')
             print(f'fig saved to {fpath}')
+        
+        plt.close(fig)
 
-        return fig, ax
     
     def visualize(self, savedir=None):
         # visualize the results
         self.dataset.to_np()        
-        ax, fig = self.plot_scatter(self.dataset['X_dat'], self.dataset['upred_dat'], fname = 'fig_upred_dat.png', savedir=savedir)
-        ax, fig = self.plot_scatter(self.dataset['X_res'], self.dataset['upred_res'], fname = 'fig_upred_res.png', savedir=savedir)
-        ax, fig = self.plot_scatter(self.dataset['X_dat_train'], self.dataset['upred_dat_train'], fname = 'fig_upred_dat_train.png', savedir=savedir)
-        ax, fig = self.plot_scatter(self.dataset['X_res_train'], self.dataset['upred_res_train'], fname = 'fig_upred_res_train.png', savedir=savedir)
-        ax, fig = self.plot_scatter(self.dataset['X_dat_train'], self.dataset['u_dat_train'], fname = 'fig_u_dat_train.png', savedir=savedir)
+        self.plot_scatter(self.dataset['X_dat'], self.dataset['upred_dat'], fname = 'fig_upred_dat.png', savedir=savedir)
+        self.plot_scatter(self.dataset['X_res'], self.dataset['upred_res'], fname = 'fig_upred_res.png', savedir=savedir)
+        self.plot_scatter(self.dataset['X_dat_train'], self.dataset['upred_dat_train'], fname = 'fig_upred_dat_train.png', savedir=savedir)
+        self.plot_scatter(self.dataset['X_res_train'], self.dataset['upred_res_train'], fname = 'fig_upred_res_train.png', savedir=savedir)
+        self.plot_scatter(self.dataset['X_dat_train'], self.dataset['u_dat_train'], fname = 'fig_u_dat_train.png', savedir=savedir)
 
         self.plot_upred_dat(savedir=savedir)
         self.plot_sample(savedir=savedir)
@@ -141,7 +142,7 @@ class FKproblem(BaseProblem):
         deltas = [0.0, 0.1, -0.1, 0.2, -0.2, 0.5, -0.5]
         self.dataset['deltas'] = deltas
         # copy the parameters, DO NOT modify the original parameters
-        tmp_param_dict = {k: v.clone() for k, v in net.params_dict.items()}
+        tmp_param_dict = {k: v.clone() for k, v in net.pde_params_dict.items()}
         # go through all the trainable pde parameters
         for k in net.trainable_param:
             param_value = tmp_param_dict[k].item()
@@ -187,40 +188,57 @@ class FKproblem(BaseProblem):
 
 
     def create_dataset_from_file(self, dsopt):
+        # porcssed in numpy
         dataset = self.dataset
+
+        dataset.to_np()
         
         uname = f'u{self.testcase}'
-
+        # create grid based on dataset
         u = dataset[uname]
         gt = dataset['gt']
         gx = dataset['gx']
         Nt_full, Nx_full = u.shape
         
-        # downsample size
+        # downsample size for residual loss
         Nt = dsopt['Nt']
         Nx = dsopt['Nx']
         dataset['Nt'] = Nt
         dataset['Nx'] = Nx
 
-        # collect X and u from final time
-        X_dat = np.column_stack((gt[-1, :].reshape(-1, 1), gx[-1, :].reshape(-1, 1)))
-        u_dat = u[-1, :].reshape(-1, 1)
-        dataset['X_dat'] = X_dat
-        dataset['u_dat'] = u_dat
-        # downsample for training
-        idx = np.linspace(0, Nx_full-1, dsopt['N_dat_train'], dtype=int)
-        dataset['X_dat_train'] = X_dat[idx, :]
-        dataset['u_dat_train'] = u_dat[idx, :]
-
+        # [gx, gt] = meshgrid(x, t)
+        # gx varies along row, gt varies along column
+        # need order='F' to match the original data
 
         # collect X and u from all time, for residual loss
-        dataset['X_res'] = np.column_stack((gt.reshape(-1, 1), gx.reshape(-1, 1)))
-        dataset['u_res'] = u.reshape(-1, 1)
+        dataset['X_res'] = np.column_stack((gt.reshape(-1, 1,order='F'), gx.reshape(-1, 1,order='F')))
+        dataset['u_res'] = u.reshape(-1, 1,order='F')
 
         # for training, downsample griddata and vectorize
-        gt, gx, u = griddata_subsample(gt, gx, u, Nt, Nx)
-        dataset['X_res_train'] = np.column_stack((gt.reshape(-1, 1), gx.reshape(-1, 1)))
-        dataset['u_res_train'] = u.reshape(-1, 1)
+        sgt, sgx, su = griddata_subsample(gt, gx, u, Nt, Nx)
+        dataset['X_res_train'] = np.column_stack((sgt.reshape(-1, 1,order='F'), sgx.reshape(-1, 1,order='F')))
+        dataset['u_res_train'] = su.reshape(-1, 1,order='F')
+        
+        dataset['X_res_train_gt'] = sgt
+        dataset['X_res_train_gx'] = sgx
+
+        # collect X and u from final time
+        X_dat = np.column_stack((gt[-1, :].reshape(-1, 1,order='F'), gx[-1, :].reshape(-1, 1,order='F')))
+        u_dat = u[-1, :].reshape(-1, 1,order='F')
+        dataset['X_dat'] = X_dat
+        dataset['u_dat'] = u_dat
+        
+        if self.dat_use_res:
+            # use the same residual points for data loss
+            sgt, sgx, su = griddata_subsample(gt, gx, u, dsopt['Nt_train'], dsopt['Nx_train'])
+            dataset['X_dat_train'] = np.column_stack((sgt.reshape(-1, 1,order='F'), sgx.reshape(-1, 1,order='F')))
+            dataset['u_dat_train'] = su.reshape(-1, 1,order='F')
+        else:
+            # downsample final time for data loss
+            idx = np.linspace(0, Nx_full-1, dsopt['N_dat_train'], dtype=int)
+            dataset['X_dat_train'] = X_dat[idx, :]
+            dataset['u_dat_train'] = u_dat[idx, :]
+
         
         # remove redundant data
         for i in range(10):
@@ -231,7 +249,7 @@ class FKproblem(BaseProblem):
         dataset.printsummary()
         
 
-    def setup_dataset(self, ds_opts, noise_opts=None):
+    def setup_dataset(self, ds_opts, noise_opts=None, device='cuda'):
         ''' downsample for training'''
         
         self.create_dataset_from_file(ds_opts)
@@ -242,26 +260,36 @@ class FKproblem(BaseProblem):
             x = self.dataset['X_dat_train'][:,1:2]
             noise = torch.zeros_like(self.dataset['u_dat_train'])
     
-            tmp = generate_grf(x, noise_opts['variance'], noise_opts['length_scale'])
+            tmp = generate_grf(x, noise_opts['std'], noise_opts['length_scale'])
             noise[:,0] = tmp.squeeze()
 
             self.dataset['noise'] = noise
             self.dataset['u_dat_train'] = self.dataset['u_dat_train'] + self.dataset['noise']
 
+        self.dataset.to_device(device)
+
+    @error_logging_decorator
     def plot_upred_dat(self, savedir=None):
+        # plot prediciton at final time
         fig, ax = plt.subplots()
         x = self.dataset['X_dat'][:, 1]
         x_train = self.dataset['X_dat_train'][:, 1]
+        t_train = self.dataset['X_dat_train'][:, 0]
+        # plot GT solution
         ax.plot(x, self.dataset['u_dat'], label='exact')
+        # plot NN prediction
         ax.plot(x, self.dataset['upred_dat'], label='NN')
-        ax.scatter(x_train, self.dataset['u_dat_train'], label='data')
+        # plot train data
+        ax.scatter(x_train, self.dataset['u_dat_train'], c=t_train, cmap='viridis', label='train')
         ax.legend(loc="best")
         ax.grid()
         if savedir is not None:
             path = os.path.join(savedir, 'fig_upred_xdat.png')
             plt.savefig(path, dpi=300, bbox_inches='tight')
             print(f'fig saved to {path}')
+        plt.close(fig)
 
+    @error_logging_decorator
     def plot_sample(self, savedir=None):
         '''plot distribution of collocation points'''
         fig, ax = plt.subplots()

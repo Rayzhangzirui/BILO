@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from util import generate_grf, add_noise,  griddata_subsample
 
 from BaseProblem import BaseProblem
-from DataSet import DataSet
+from MatDataset import MatDataset
 from DenseNet import DenseNet, ParamFunction
 
 class HeatDenseNet(DenseNet):
@@ -76,13 +76,13 @@ class HeatDenseNet(DenseNet):
 
     def embedding_to_u(self, X):
         # X is the embedded input, linear combination of the "features"
-        Xtmp = self.act(X)
+        Xtmp = self.act_fun(X)
         
         for i, hidden_layer in enumerate(self.hidden_layers):
             hidden_output = hidden_layer(Xtmp)
             if self.use_resnet:
                 hidden_output += Xtmp  # ResNet connection
-            hidden_output = self.act(hidden_output)
+            hidden_output = self.act_fun(hidden_output)
             Xtmp = hidden_output
         
         u = self.output_layer(Xtmp)
@@ -127,9 +127,9 @@ class HeatProblem(BaseProblem):
         self.testcase = kwargs['testcase']
         self.use_exact_u0 = kwargs['use_exact_u0']
         
-        self.param = {'u0': 0.0}
+        self.param = {'u0': 1.0}
 
-        self.dataset = DataSet(kwargs['datafile'])
+        self.dataset = MatDataset(kwargs['datafile'])
         self.D = self.dataset['D']
     
     def residual(self, nn, X_in):
@@ -188,7 +188,7 @@ class HeatProblem(BaseProblem):
             pde_param.update(init_param)
 
         net = HeatDenseNet(**kwargs,
-                            params_dict=pde_param,
+                            all_params_dict=pde_param,
                             trainable_param = self.opts['trainable_param'])
 
         net.use_exact_u0 = self.use_exact_u0
@@ -278,7 +278,7 @@ class HeatProblem(BaseProblem):
 
         if noise_opt['use_noise']:
             x = self.dataset['X_dat_train'][:, 1]
-            noise = generate_grf(x, noise_opt['variance'], noise_opt['length_scale'])
+            noise = generate_grf(x, noise_opt['std'], noise_opt['length_scale'])
             self.dataset['noise'] = noise.reshape(-1, 1)
             self.dataset['u_dat_train'] = self.dataset['u_dat_train'] + self.dataset['noise']
     

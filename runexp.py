@@ -1,5 +1,10 @@
 #!/usr/bin/env python
 from datetime import datetime
+import os
+from utilgpu import pick_gpu_lowest_memory
+
+gid, _ = pick_gpu_lowest_memory()
+os.environ['CUDA_VISIBLE_DEVICES'] = str(gid)
 
 from Engine import *
 
@@ -17,7 +22,6 @@ f.write(' '.join(sys.argv))
 f.write('\n')
 f.close()
 
-
 # set seed
 set_seed(optobj.opts['seed'])
 
@@ -31,5 +35,9 @@ eng.run()
 # eng.trainer.save()
 
 # eng.pde.dataset.to_device(eng.device)
+
+# visualization
+
 eng.pde.visualize(savedir=eng.logger.get_dir())
+
 

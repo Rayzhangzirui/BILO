@@ -3,7 +3,62 @@ import sys
 import torch
 import torch.nn as nn
 
-from DataSet import DataSet
+from MatDataset import MatDataset
+
+from neuralop.models import FNO
+
+
+class scalarFNO(nn.Module):
+    # For comparision with DeepONet
+    def __init__(self, param_dim=1, X_dim=1, output_dim=1, n_modes = 16, **kwargs):
+        super(scalarFNO, self).__init__()
+
+        self.param_dim = param_dim
+        self.X_dim = X_dim
+        self.output_dim = output_dim
+        self.pde_param = None
+
+        self.fno = FNO(n_modes=(n_modes,), hidden_channels=kwargs['hidden_channels'],
+                in_channels=X_dim+param_dim, out_channels=output_dim,positional_embedding=None)
+            
+        self.lambda_transform = kwargs.get('lambda_transform', lambda x, u: u)
+
+    def forward(self, P_input, X_input):
+        """
+        P_input: (B, k)  - PDE parameters
+        X_input: (N, d)  - Spatial points
+        Output:   (B, N) or (B, out_channels, N)
+        """
+        B, k = P_input.shape  # (batch, k)
+        N, d = X_input.shape  # (N, d)
+
+        # 1) Transpose X_input -> (d, N)
+        X_input_t = X_input.t()  # shape: (d, N)
+
+        # 2) Broadcast to batch dimension -> (B, d, N)
+        X_input_expanded = X_input_t.unsqueeze(0).expand(B, d, N)
+
+        # 3) Broadcast P_input -> (B, k, N)
+        #    We unsqueeze at dim=-1 and then expand along N.
+        P_input_expanded = P_input.unsqueeze(-1).expand(B, k, N)
+
+        # 4) Concatenate along channel dimension (dim=1): (B, d + k, N)
+        X = torch.cat([X_input_expanded, P_input_expanded], dim=1)
+
+        # Pass through your FNO which expects shape (B, in_channels, N).
+        # Suppose FNO returns (B, out_channels, N). With out_channels=1, that's (B, 1, N).
+        out = self.fno(X)
+
+        # If you want a final shape (B, N), you can squeeze out_channels=1:
+        out = out.squeeze(1)  # shape: (B, N)
+
+        # Apply the lambda transform to each batch of output
+        out = self.lambda_transform(X_input, out.t()).t()
+
+        return out
+        
+    
+    
 
 class DeepONet(nn.Module):
     def __init__(self, 
@@ -90,15 +145,15 @@ class OpData(torch.utils.data.Dataset):
 # simple test of the network
 if __name__ == "__main__":
     import sys
-    # test the FKDataSet class
+    # test the FKMatDataset class
     filename  = sys.argv[1]
     
 
-    dataset = DataSet(filename)
+    dataset = MatDataset(filename)
     
     dataset.printsummary()
 
-    fkdata = FKData( dataset['X'], dataset['P'], dataset['U'])
+    fkdata = OpData( dataset['X'], dataset['P'], dataset['U'])
     
     data_loader = torch.utils.data.DataLoader(fkdata, batch_size=10, shuffle=True)
 

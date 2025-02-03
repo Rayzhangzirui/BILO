@@ -15,128 +15,47 @@ from util import mse, set_device, set_seed
 
 class lossCollection:
     # loss, parameter, and optimizer
-    def __init__(self, net, pde,  loss_weight_dict, loss_opts):
+    def __init__(self, net, pde, loss_weight_dict, weight_as_sigma=[]):
+        '''
+        weight_as_sigma: if True, the weight is treated as sigma in the negative log likelihood
+        '''
 
 
         self.net = net
         self.pde = pde
-
-        # intermediate results for residual loss
-        self.res = None
-        self.grad_res_params = {} # gradient of residual w.r.t. parameter
-        self.u_pred = None
-
+        self.weight_as_sigma = weight_as_sigma
         # collection of all loss functions
-        self.loss_dict = {'res': self.resloss,
-        'fullresgrad': self.fullresgradloss, 'data': self.dataloss,
-        'bc': self.bcloss,'funcloss':self.funcloss,
-        'resgradfunc': self.resgradfuncloss,
-        'l2grad': self.l2gradloss,
-        'l1grad': self.l1gradloss}
-
+        self.loss_dict = self.pde.loss_dict
         self.loss_weight = {} # dict of active loss: weight
 
-        # collect keys with positive weights
-        self.loss_active = []
-        for k in self.loss_dict.keys():
-            if loss_weight_dict[k] is not None:
-                self.loss_active.append(k)
+        for k in loss_weight_dict:
+            if k in weight_as_sigma:
+                self.loss_weight[k] = 1.0 / loss_weight_dict[k]**2
+            else:
                 self.loss_weight[k] = loss_weight_dict[k]
     
-        self.wloss_comp = {} # component of each loss, weighted
+        self.weighted_loss_comp = {} # component of each loss, weighted
+        self.unweighted_loss_comp = {} # component of each loss, unweighted
         self.wtotal = None # total loss for backprop
 
-        self.idmx = None # identity matrix for computing gradient of residual w.r.t. parameter
-        self.idv = None # sampling matrix
-        self.msample = loss_opts['msample']
     
-    def resloss(self):
-        self.res, self.u_pred = self.pde.get_res_pred(self.net)
-        val_loss_res = mse(self.res)
-        return val_loss_res
-    
-    def l2weightloss(self):
-        # l2 regularization of pde parameter
-        # only used for function case.
-        all_params = torch.cat([p.view(-1) for p in self.net.param_pde_trainable])
+    def get_wloss_sum_comp(self, list_of_loss: list, yes_grad: bool):
+        # for bilevel optimization
+        # list_of_loss can be empty list
+        weighted_sum = 0.0 if list_of_loss else None
+        weighted_loss_comp = {}
+        unweighted_loss_comp = {}
+        with torch.set_grad_enabled(yes_grad):
+            for key in list_of_loss:
+                unweighted_loss_comp[key] = self.loss_dict[key](self.net)
 
-        return torch.sum(torch.pow(all_params, 2))
-    
-    def l2normloss(self):
-        return self.pde.get_l2norm(self.net)
-    
-    def l2gradloss(self):
-        return self.pde.get_l2grad(self.net)
-    
-    def l1gradloss(self):
-        return self.pde.get_l1grad(self.net)
+                weighted_loss_comp[key] = self.loss_weight[key] * unweighted_loss_comp[key]
+                weighted_sum += weighted_loss_comp[key]
         
+        return weighted_sum, weighted_loss_comp, unweighted_loss_comp
 
-    def resgradfuncloss(self):
-        # compute gradient of residual w.r.t. parameter on every residual point.
-        # very memory intensive
-        # assume output dim is 1
-
-        n = self.res.shape[0]
-        if self.idmx is None:
-            self.idmx = torch.eye(n).to(self.res.device) # identity matrix for computing gradient of residual w.r.t. parameter
-
-        resgradmse = 0.0
-        res_flat = torch.flatten(self.res)
         
-        tmp = torch.autograd.grad(res_flat, self.net.param_pde_trainable, grad_outputs=self.idmx,
-            create_graph=True, retain_graph=True,allow_unused=True, is_grads_batched=True)
-
-        # mse
-        for p in tmp:
-            resgradmse += torch.sum(torch.pow(p, 2))
-        
-        return resgradmse/n
-
-    def fullresgradloss(self):
-        # compute gradient of residual w.r.t. parameter on every residual point.
-        # very memory intensive
-        self.res_unbind = self.res.unbind(dim=1) # unbind residual into a list of 1d tensor
-
-        n = self.res.shape[0]
-        
-        resgradmse = 0.0        
-        for pname in self.net.trainable_param:
-            for j in range(self.pde.output_dim):
-                tmp = torch.autograd.grad(self.res_unbind[j], self.net.params_expand[pname], grad_outputs=torch.ones_like(self.res_unbind[j]),
-                create_graph=True, retain_graph=True,allow_unused=True)[0]
-                
-                resgradmse += torch.sum(torch.pow(tmp, 2))
-        
-        return resgradmse/n
-    
-    def dataloss(self):
-        # a little bit less efficient, u_pred is already computed in resloss
-        return self.pde.get_data_loss(self.net)
-    
-    def bcloss(self):
-        # compute loss from boundary condition
-        return self.pde.get_bc_loss(self.net)
-    
-    def funcloss(self):
-        # compute loss from parameter
-        return self.pde.func_mse(self.net)
-    
-    def getloss(self):
-        # for each active loss, compute the loss and multiply with the weight
-        losses = {}
-        weighted_sum = 0.0
-        for key in self.loss_active:
-            losses[key] = self.loss_weight[key] * self.loss_dict[key]()
-            weighted_sum += losses[key]
-        
-        self.wloss_comp = losses
-        self.wtotal = weighted_sum
-        self.wloss_comp['total'] = self.wtotal
-    
-    def get_wloss_sum(self, list_of_loss):
-        # return the sum of weighted loss
-        return sum([self.wloss_comp[key] for key in list_of_loss])
+            
 
 
 class EarlyStopping:
@@ -152,8 +71,11 @@ class EarlyStopping:
         self.counter_loss = 0
         self.epoch = 0
 
-    def __call__(self, loss, params, epoch):
+    def __call__(self, epoch, loss):
         self.epoch = epoch
+        # convert tensor to float
+        
+        
         if epoch >= self.max_iter:
             print('\nStop due to max iteration')
             return True
@@ -161,12 +83,14 @@ class EarlyStopping:
         if epoch < self.burnin:
             return False
         
-        if loss < self.tolerance:
-            print('Stop due to loss {loss} < {self.tolerance}')
-            return True
-         
-
+        # monitor loss, stop if not improving
         if self.monitor_loss:
+            loss = loss.item()
+        
+            if loss < self.tolerance:
+                print(f'Stop due to loss {loss} < {self.tolerance}')
+                return True
+
             if self.best_loss is None:
                 self.best_loss = loss
             elif loss > self.best_loss - self.delta_loss:

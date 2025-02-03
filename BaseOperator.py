@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import Subset, DataLoader, random_split
 import numpy as np
 
-from DataSet import DataSet
+from MatDataset import MatDataset
 
 
 
@@ -17,7 +17,7 @@ class BaseOperator(ABC):
         self.param_dim = None
 
         
-        self.dataset = DataSet(kwargs['datafile'])
+        self.dataset = MatDataset(kwargs['datafile'])
         self.lambda_transform = None
 
     def regularization_loss(self, nn):

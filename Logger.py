@@ -48,11 +48,17 @@ class Logger:
             self.csv_logger = CSVLogger(path)
         
         
-        
-
-    def log_metrics(self, metric_dict:dict, step=None):
+    def set_tags(self, key:str, value:str):
         if self.opts['use_mlflow']:
+            mlflow.set_tags({key:value})
+        else:
+            print(key, value)
 
+    def log_metrics(self, metric_dict:dict, step=None, prefix=''):
+        # remove key with None value
+        metric_dict = {prefix+k:v for k,v in metric_dict.items()}
+
+        if self.opts['use_mlflow']:
             mlflow.log_metrics(to_double(metric_dict), step=step)
 
         if self.opts['use_stdout']:
@@ -94,16 +100,27 @@ class Logger:
         # load from mlflow or local directory
         if name_str is not None:
             try:
-                exp_name, run_name = name_str.split(':')
+                parts = name_str.split(':')
+                if len(parts) == 2:
+                    # exp_name:run_name
+                    source = 'mlflow' if self.opts['use_mlflow'] else 'local'
+                    exp_name = parts[0]
+                    run_name = parts[1]
+                elif len(parts) == 3:
+                    # source:exp_name:run_name, source = local or mlflow
+                    source = parts[0]
+                    assert source in ['local', 'mlflow'], "source must be 'local' or 'mlflow'"
+                    exp_name = parts[1]
+                    run_name = parts[2]
             except ValueError:
-                raise ValueError("name_str must be in the format 'exp_name:run_name'")
+                raise ValueError("name_str must be in the format '[source:]exp_name:run_name'")
 
-        if self.opts['use_mlflow']:
+        if source == 'mlflow':
+            # get artifact from mlflow
             helper = MlflowHelper()
             run_id = helper.get_id_by_name(exp_name, run_name)
             artifact_dict = helper.get_artifact_dict_by_id(run_id)
             
-
         else:
             # get files in directory
             dpath = os.path.join(RUNS, exp_name, run_name)

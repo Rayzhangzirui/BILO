@@ -95,17 +95,7 @@ class BaseOptions:
     def __init__(self):
         self.opts = None
     
-    def parse_args(self, *args):
-        # first parse args and update dictionary
-        # then process dependent options
-        self.parse_nest_args(*args)
-        self.processing()
     
-    def processing(self):
-        # need to be overriden by subclass
-        # throw error
-        raise NotImplementedError('Subclass must implement abstract method')        
-        
 
     def parse_nest_args(self, *args):
         # parse args according to dictionary
@@ -117,6 +107,8 @@ class BaseOptions:
             # otherwise, try to convert to other type
             if isinstance(default_val,str):
                 val = args[i+1]
+            elif isinstance(default_val, list):
+                val = args[i+1].split(',')
             else:
                 try:
                     val = ast.literal_eval(args[i+1])
@@ -131,6 +123,10 @@ class BaseOptions:
     
     def convert_to_dict(self, param_val_str):
         ''' convert string of param1,value1,param2,value2 to dictionary '''
+
+        if param_val_str == '':
+            return {}
+
         param_val_list = param_val_str.split(',')
         param_val_dict = {}
         for i in range(0,len(param_val_list),2):

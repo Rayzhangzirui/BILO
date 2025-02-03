@@ -10,162 +10,33 @@ import matplotlib.pyplot as plt
 from util import generate_grf, add_noise
 
 from BaseProblem import BaseProblem
-from DataSet import DataSet
+from MatDataset import MatDataset
 
 from DenseNet import DenseNet, ParamFunction
 
 GLOBTEST = False
-
-class VarPoiDenseNet(DenseNet):
-    ''' override the embedding function of DenseNet'''
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-
-        fdepth = kwargs['fdepth']
-        fwidth = kwargs['fwidth']
-        activation = kwargs['activation']
-        output_activation = kwargs['output_activation']
-        fsiren = kwargs['fsiren']
-        
-        
-        # override the embedding function, also enforce dirichlet boundary condition
-        
-        if GLOBTEST:
-            self.func_param = ParamFunction(fdepth=1, fwidth=1, 
-            activation='id',output_activation='id')
-            # set bias = 1, weight = 0
-            self.func_param.layers[0].bias.data.fill_(1.0)
-            self.func_param.layers[0].weight.data.fill_(0.0)
-            self.func_param.layers[0].weight.requires_grad = False
-            
-            # For testing, VarPoiDenseNet is linear
-            self.act = nn.Identity()
-            self.output_layer = nn.Identity()
-        else:
-            self.func_param = ParamFunction(fdepth=fdepth, fwidth=fwidth,
-                                        fsiren=fsiren,
-                                        activation=activation, output_activation=output_activation,
-                                        output_transform=lambda x, u: u * x * (1.0 - x) + 1.0 )
-
-        self.collect_trainable_param()
-        self.D_eval = None
-        
-        
-
-    def setup_embedding_layers(self, in_features=None):
-
-        self.param_embeddings = nn.ModuleDict({'D': nn.Linear(1, self.width, bias=False)})
-
-        if GLOBTEST:
-            # set weight = 1, identity 
-            self.param_embeddings['D'].weight.data.fill_(1.0)
-            self.input_layer.weight.data.fill_(1.0)
-            self.input_layer.bias.data.fill_(0.0)
-            self.lambda_transform = lambda x, u: u**2
-            
-        # set requires_grad to False
-        for embedding_weights in self.param_embeddings.parameters():
-            embedding_weights.requires_grad = False
-        
-        # fix embedding layer set embedding to identity
-        # self.param_embeddings['D'].weight.data.fill_(1.0)
-
-
-    def embed_x(self, x):
-        '''embed x to the input layer'''
-        if self.fourier:
-            x_embed = torch.sin(2 * torch.pi * self.fflayer(x))
-        x_embed = self.input_layer(x)
-
-        return x_embed
-    
-    def embedding(self, x):
-        # override the embedding function
-        
-        # have to evaluate self.func_param(xcoord) inside the network
-        # otherwise self.func_param is not in the computation graph
-    
-        x_embed = self.embed_x(x)
-
-        if self.with_param:
-            
-            param_vector = self.func_param(x) #(n, 1) D at x_res_train
-            self.D_eval = param_vector
-            self.params_expand['D'] = self.D_eval
-            y_embed = self.param_embeddings['D'](self.D_eval)
-            
-            x_embed += y_embed
-        else:
-            # if u(x), not function of unkown
-            self.params_expand['D'] =self.func_param(x)
-            self.D_eval = self.params_expand['D']
-
-        return x_embed
-
-
-        
-    
-    def embedding_to_u(self, X):
-        # X is the embedded input, linear combination of the "features"
-        Xtmp = self.act(X)
-        
-        for i, hidden_layer in enumerate(self.hidden_layers):
-            hidden_output = hidden_layer(Xtmp)
-            if self.use_resnet:
-                hidden_output += Xtmp  # ResNet connection
-            hidden_output = self.act(hidden_output)
-            Xtmp = hidden_output
-        
-        u = self.output_layer(Xtmp)
-        
-        return u
-
-    def forward(self, x):
-        
-        X = self.embedding(x)
-        
-        u = self.embedding_to_u(X)
-
-        u = self.output_transform(x, u)
-        return u
-    
-    def variation(self, x, z):
-        '''variation of u w.r.t D
-        Let z be custom function, u = u(x, z)
-        '''
-        x_embed = self.embed_x(x)
-        z_embed = self.param_embeddings['D'](z)
-        X = x_embed + z_embed
-
-        u = self.embedding_to_u(X)
-        u = self.output_transform(x, u)
-        return u
-    
-
 
 class VarPoiProblem(BaseProblem):
     def __init__(self, **kwargs):
         super().__init__()
         self.input_dim = 1
         self.output_dim = 1
-        self.opts=kwargs
-
-        self.param = {'D': kwargs['D']}
+        self.opts=kwargs        
+                                
         self.testcase = kwargs['testcase']
 
-        self.lambda_transform = lambda x, u: u * x * (1.0 - x)
+        self.lambda_transform = lambda x, u, param: u * x * (1.0 - x)
 
         self.dataset = None
         if kwargs['datafile']:
-            self.dataset = DataSet(kwargs['datafile'])
+            self.dataset = MatDataset(kwargs['datafile'])
 
     def u_exact(self, x):
         if self.testcase == 0:
             # different D
-            return torch.sin(torch.pi  * x) / self.param['D']
+            return torch.sin(torch.pi  * x) / self.all_params_dict['D']
         elif self.testcase == 1:
-            # same u as testcase 0 D = 1, change forcing
+            # same u as testcase 0, D = 1, change forcing
             return torch.sin(torch.pi  * x)
         elif self.testcase == 2:
             # different D, same forcing
@@ -183,7 +54,7 @@ class VarPoiProblem(BaseProblem):
     def D_exact(self, x):
         if self.testcase == 0:
             # constant coefficient
-            return self.param['D'] * torch.ones_like(x)
+            return self.all_params_dict['D'] * torch.ones_like(x)
         elif self.testcase == 1:
             # variable coefficient
             return 1 +  0.5*torch.sin(2 * torch.pi * x)
@@ -218,10 +89,9 @@ class VarPoiProblem(BaseProblem):
         
         x.requires_grad_(True)
         
-        u = nn(x)
+        u = nn(x, nn.pde_params_dict)
+        D = nn.params_expand['D']
 
-        D = nn.D_eval
-        
         u_x = torch.autograd.grad(u, x,
             create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(u))[0]
         dxDux = torch.autograd.grad(D*u_x, x,
@@ -246,7 +116,7 @@ class VarPoiProblem(BaseProblem):
             #     create_graph=True, retain_graph=True,allow_unused=True)[0]
             
             # tmp is the same as dres
-            # import pdb; pdb. set_trace()
+            
                     
         return res, u
 
@@ -255,25 +125,20 @@ class VarPoiProblem(BaseProblem):
         kwargs['input_dim'] = self.input_dim
         kwargs['output_dim'] = self.output_dim
 
-        pde_param = self.param.copy()
-        init_param = self.opts['init_param']
-        if init_param is not None:
-            pde_param.update(init_param)
+        self.param_fun = ParamFunction(fdepth=kwargs['fdepth'], fwidth=kwargs['fwidth'],
+                                    fsiren=kwargs['fsiren'],
+                                    activation=kwargs['activation'], output_activation=kwargs['output_activation'],
+                                    output_transform=lambda x, u: u * x * (1.0 - x) + 1.0 )
+                
+        self.all_params_dict = {'D': self.param_fun}
 
-        net = VarPoiDenseNet(**kwargs,
+        net = DenseNet(**kwargs,
                         lambda_transform=self.lambda_transform,
-                        params_dict= self.param,
+                        all_params_dict= self.all_params_dict,
                         trainable_param = self.opts['trainable_param'])
-        net.setup_embedding_layers()
+        # net.setup_embedding_layers()
         return net
-
-    def print_info(self):
-        # print info of pde
-        # print all parameters
-        print('Parameters:')
-        for k,v in self.param.items():
-            print(f'{k} = {v}')
-
+    
     def get_res_pred(self, net):
         ''' get residual and prediction'''
         res, pred = self.residual(net, self.dataset['x_res_train'])
@@ -281,42 +146,36 @@ class VarPoiProblem(BaseProblem):
     
     def get_l2grad(self, net):
         # estimate l2 norm of u, 1/N \sum u^2
-        
         x = self.dataset['x_res_train']
-        D = net.func_param(x)
+        D = net.pde_params_dict['D'](x)
         D_x = torch.autograd.grad(D, x,
             create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(D))[0]
         return torch.mean(torch.square(D_x))
 
     def get_l1grad(self, net):
         # estimate l1 norm of u, 1/N \sum |u|
-        
         x = self.dataset['x_res_train']
-        D = net.func_param(x)
+        D = net.pde_params_dict['D'](x)
         D_x = torch.autograd.grad(D, x,
             create_graph=True, retain_graph=True, grad_outputs=torch.ones_like(D))[0]
         return torch.mean(torch.abs(D_x))
     
     def get_data_loss(self, net):
         # get data loss
-        u_pred = net(self.dataset['x_dat_train'])
+        u_pred = net(self.dataset['x_dat_train'], net.pde_params_dict)
         loss = torch.mean(torch.square(u_pred - self.dataset['u_dat_train']))        
         return loss
 
     def get_l2norm(self, net):
         # estimate l2 norm of u, 1/N \sum u^2
-        u_pred = net(self.dataset['x_res_train'])
+        u_pred = net(self.dataset['x_res_train'], net.pde_params_dict)
         loss = torch.mean(torch.square(u_pred))
         return loss
-
-    
-
-    
 
     def create_dataset_from_pde(self, dsopt):
         # create dataset from pde using datset option and noise option
         assert self.dataset is None, 'datafile not provide, dataset should be None'
-        dataset = DataSet()
+        dataset = MatDataset()
 
         # residual col-pt (collocation point), no need for u
         dataset['x_res'] = torch.linspace(0, 1, dsopt['N_res_test']).view(-1, 1)
@@ -354,34 +213,37 @@ class VarPoiProblem(BaseProblem):
         self.dataset.subsample_evenly_astrain(dsopt['N_res_train'], ['x_res', 'D_res', 'f_res'])
         self.dataset.subsample_evenly_astrain(dsopt['N_dat_train'], ['x_dat', 'u_dat', 'D_dat'])
 
-    def setup_dataset(self, dsopt, noise_opt):
+    def setup_dataset(self, dsopt, noise_opts=None, device='cuda'):
         '''add noise to dataset'''
         if self.dataset is None:
             self.create_dataset_from_pde(dsopt)
         else:
             self.create_dataset_from_file(dsopt)
 
-        if noise_opt['use_noise']:
-            add_noise(self.dataset, noise_opt)
+        if noise_opts['use_noise']:
+            add_noise(self.dataset, noise_opts)
+        
+        self.dataset.to_device(device)
     
     def func_mse(self, net):
         '''mean square error of variable parameter'''
         x = self.dataset['x_res_train']
         y = net.func_param(x)
         return torch.mean(torch.square(y - self.dataset['D_res_train']))
-    
+
+    @torch.no_grad()    
     def make_prediction(self, net):
         # make prediction at original X_dat and X_res
-        with torch.no_grad():
-            self.dataset['upred_res'] = net(self.dataset['x_res'])
-            coef = net.func_param(self.dataset['x_res'])
-            self.dataset['func_res'] = coef
+        x = self.dataset['x_res']
+        self.dataset['upred_res'] = net(x, net.pde_params_dict)
+        coef = net.pde_params_dict['D'](x)
+        self.dataset['func_res'] = coef
 
 
-            self.dataset['upred_dat'] = net(self.dataset['x_dat'])
-            coef = net.func_param(self.dataset['x_dat'])
-            self.dataset['func_dat'] = coef
-        
+        self.dataset['upred_dat'] = net(self.dataset['x_dat'], net.pde_params_dict)
+        coef = net.pde_params_dict['D'](self.dataset['x_dat'])
+        self.dataset['func_dat'] = coef
+    
         # make prediction with different parameters
         self.prediction_variation(net)
 
@@ -404,7 +266,7 @@ class VarPoiProblem(BaseProblem):
             # replace parameter
             with torch.no_grad():
                 z = fun(x)
-                u = net.variation(x, z )
+                u = net(x, {'D':z})
                 
             key = f'uvar_{funkey}_dat'
             var = f'Dvar_{funkey}_dat'
@@ -442,15 +304,15 @@ class VarPoiProblem(BaseProblem):
         
 
 
-
+    @torch.no_grad()
     def validate(self, nn):
         '''compute l2 error and linf error of inferred D(x)'''
         x  = self.dataset['x_dat']
         D = self.dataset['D_dat']
-        with torch.no_grad():
-            Dpred = nn.func_param(x)
-            l2norm = torch.mean(torch.square(D - Dpred))
-            linfnorm = torch.max(torch.abs(D - Dpred)) 
+        
+        Dpred = nn.pde_params_dict['D'](x)
+        l2norm = torch.mean(torch.square(D - Dpred))
+        linfnorm = torch.max(torch.abs(D - Dpred)) 
         
         return {'l2err': l2norm.item(), 'linferr': linfnorm.item()}
 
