@@ -74,9 +74,6 @@ default_opts = {
         # otherwise,  ValueError("loaded state dict contains a parameter group")
         'rff_trainable':False,
         'train_embed': False,   
-        # LoRA
-        'rank': 0,
-        'lora_alpha':1.0,
     },
     'func_opts': {
         'fdepth': 4,
@@ -143,15 +140,6 @@ default_opts = {
         'schopt_net':'gamma,1.0',
         'schopt_pde':'gamma,1.0',
         'acc_iter': 1, # accumulate n-iteration of gradient
-        # sampling options
-        'backtrack': False, # backtrack LoRA weights for rejected proposal
-        'merge': False, # merge LoRA weights for accepted proposal
-        # HMC options
-        'lf_steps': 10, # number of steps for LeapFrog
-        'random_L': False, # make lf_steps random
-        'example_every': 0, # for collecting pde solution samples during sampling
-        'adapt_M': False, # adapt mass matrix
-        'refresh': False, # refresh the optimizer
     },
     'noise_opts':{
         'use_noise': False,

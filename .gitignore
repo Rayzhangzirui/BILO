@@ -1,7 +1,6 @@
 mlruns/
 newruns/
 *.pth
-*.png
 fig*/
 runs/
 tmp*/
@@ -10,5 +9,5 @@ PyTorch_LBFGS/
 __pycache__/
 torchnotes/
 *.sh
-*.yaml
+yaml*/
 Langevin-dynamics/

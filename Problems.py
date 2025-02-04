@@ -13,7 +13,6 @@ from DarcyProblem import DarcyProblem
 
 from PoissonProblem2 import PoissonProblem2
 from PoissonHyper import PoissonHyper
-from PointProcess import PointProcess
 from FKOpLproblem import FKOperatorLearning
 from VarPoiDeepONet import VarPoiDeepONet
 

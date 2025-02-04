@@ -14,90 +14,15 @@ from DenseNet import DenseNet, ParamFunction
 
 class DarcyDenseNet(DenseNet):
     ''' override the embedding function of DenseNet
-    This function represent the f
     - div(f grad u) = 1
-    A takes the form 9sigmoid(x) + 3, mainly 12 and 3
     '''
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        fdepth = kwargs['fdepth']
-        fwidth = kwargs['fwidth']
-        activation = kwargs['activation']
-        output_activation = kwargs['output_activation']
-        
-        # f(t,x) = 0 at x=0, x=1, t=0, t=1
-        self.func_param = ParamFunction(input_dim=2, output_dim=1,fdepth=fdepth, fwidth=fwidth,
-                                        activation=activation, output_activation= output_activation,
-                                        output_transform=lambda x, u: torch.sigmoid(u) * 9 + 3)
-        self.collect_trainable_param()
-
-
-    def setup_embedding_layers(self):
-
-        # embedding layer
-        self.param_embeddings = nn.ModuleDict({'f': nn.Linear( 1, self.width, bias=False)})
-
-        # set requires_grad to False
-        for embedding_weights in self.param_embeddings.parameters():
-            embedding_weights.requires_grad = False
-    
-    def output_transform(self, X, u):
+    def output_transform(self, X, u, param):
         ''' impose 0 boundary condition'''
         # u(x,y) =u_NN(x,t) * x * (1-x) * y * (1-y)
         return u * X[:,1:2] * (1 - X[:,1:2]) * X[:,0:1] * (1 - X[:,0:1])
-    
-    def embed_x(self, x):
-        '''embed x to the input layer'''
-        if self.fourier:
-            x_embed = torch.sin(2 * torch.pi * self.fflayer(x))
-        x_embed = self.input_layer(x)
-        return x_embed
-
-    def embedding(self, x):
-        # override the embedding function
-        # have to evaluate self.func_param(xcoord) inside the network
-        # otherwise self.func_param is not in the computation graph
-    
-        t_x_coord = x
-        x_embed = self.embed_x(x)
-
-        if self.with_param:
-            f = self.func_param(t_x_coord) #(n, 1) D at x_res_train
-            self.f_eval = f
-            self.params_expand['f'] = f
-            y_embed = self.param_embeddings['f'](f)
-            x_embed += y_embed
-        else:
-            # if varnilla, u(x), not function of unkown
-            self.params_expand['f'] = self.func_param(t_x_coord)
-            self.f_eval = self.params_expand['f']
-            
-        return x_embed
-
-    def embedding_to_u(self, X):
-        # X is the embedded input, linear combination of the "features"
-        Xtmp = self.act(X)
-        
-        for i, hidden_layer in enumerate(self.hidden_layers):
-            hidden_output = hidden_layer(Xtmp)
-            if self.use_resnet:
-                hidden_output += Xtmp  # ResNet connection
-            hidden_output = self.act(hidden_output)
-            Xtmp = hidden_output
-        
-        u = self.output_layer(Xtmp)
-        
-        return u
-
-    def forward(self, x):
-        
-        X = self.embedding(x)
-        
-        u = self.embedding_to_u(X)
-
-        u = self.output_transform(x, u)
-        return u
     
 class DarcyProblem(BaseProblem):
     def __init__(self, **kwargs):
@@ -105,6 +30,10 @@ class DarcyProblem(BaseProblem):
         self.input_dim = 2 # x, y
         self.output_dim = 1
         self.opts=kwargs
+
+        # self.loss_dict['l2grad'] = self.get_l2grad
+        self.loss_dict['l1grad'] = self.get_l1grad
+
 
         self.dataset = MatDataset(kwargs['datafile'])
         self.testcase = kwargs['testcase']
@@ -121,10 +50,10 @@ class DarcyProblem(BaseProblem):
         nn_input = torch.cat((x,y), dim=1)
 
         # Forward pass through the network
-        u_pred = nn(nn_input)
+        u_pred = nn(nn_input, nn.pde_params_dict)
 
         # Get the predicted f
-        f = nn.f_eval
+        f = nn.params_expand['f']
 
         # Define a tensor of ones for grad_outputs
         v = torch.ones_like(u_pred)
@@ -150,14 +79,14 @@ class DarcyProblem(BaseProblem):
     
     def get_data_loss(self, net):
         # get data loss
-        u_pred = net(self.dataset['X_dat_train'])
+        u_pred = net(self.dataset['X_dat_train'], net.pde_params_dict)
         loss = torch.mean(torch.square(u_pred - self.dataset['u_dat_train']))
         return loss
     
     def func_mse(self, net):
         '''mean square error of variable parameter'''
         x = self.dataset['X_dat_train']
-        y = net.func_param(x)
+        y = net.pde_params_dict['f'](x)
         return torch.mean(torch.square(y - self.dataset['f_dat_train']))
     
     def get_grad(self, net):
@@ -200,15 +129,17 @@ class DarcyProblem(BaseProblem):
         kwargs['input_dim'] = self.input_dim
         kwargs['output_dim'] = self.output_dim
 
-        pde_param = self.param.copy()
-        init_param = self.opts['init_param']
-        if init_param is not None:
-            pde_param.update(init_param)
+        # f takes the form 9sigmoid(x) + 3, mainly 12 and 3
+        self.param_fun = ParamFunction(input_dim=2, output_dim=1,
+            fdepth=kwargs['fdepth'], fwidth=kwargs['fwidth'],fsiren=kwargs['fsiren'],
+                                    activation=kwargs['activation'], output_activation=kwargs['output_activation'],
+                                    output_transform=lambda x, u: torch.sigmoid(u) * 9 + 3)
+                
+        self.all_params_dict = {'f': self.param_fun}
 
         net = DarcyDenseNet(**kwargs,
-                            params_dict={},
+                            all_params_dict= self.all_params_dict,
                             trainable_param = ['f'])
-        net.setup_embedding_layers()
         
         return net
 
@@ -222,12 +153,12 @@ class DarcyProblem(BaseProblem):
         x_res_train = self.dataset['X_res_train']
         
         with torch.no_grad():
-            self.dataset['upred_dat'] = net(x_dat)
-            self.dataset['upred_res'] = net(x_res)
-            self.dataset['fpred_res'] = net.params_expand['f']
+            self.dataset['upred_dat'] = net(x_dat, net.pde_params_dict)
+            self.dataset['upred_res'] = net(x_res, net.pde_params_dict)
+            self.dataset['fpred_res'] = net.pde_params_dict['f'](x_res)
 
-            self.dataset['upred_dat_train'] = net(x_dat_train)
-            self.dataset['upred_res_train'] = net(x_res_train)
+            self.dataset['upred_dat_train'] = net(x_dat_train, net.pde_params_dict)
+            self.dataset['upred_res_train'] = net(x_res_train, net.pde_params_dict)
         
     
     def visualize(self, savedir=None):
@@ -277,14 +208,14 @@ class DarcyProblem(BaseProblem):
         x = self.dataset['X_res']
         f = self.dataset['f_res']
         with torch.no_grad():
-            f_pred = nn.func_param(x)
+            f_pred = nn.pde_params_dict['f'](x)
             err = f - f_pred
             l2norm = torch.mean(torch.square(err))
             linfnorm = torch.max(torch.abs(err)) 
         
         return {'l2err': l2norm.item(), 'linferr': linfnorm.item()}
 
-    def setup_dataset(self, ds_opts, noise_opts=None):
+    def setup_dataset(self, ds_opts, noise_opts=None, device='cuda'):
         ''' downsample for training'''
         
         self.create_dataset_from_file(ds_opts)
@@ -300,6 +231,8 @@ class DarcyProblem(BaseProblem):
 
             self.dataset['noise'] = noise
             self.dataset['u_dat_train'] = self.dataset['u_dat_train'] + self.dataset['noise']
+        
+        self.dataset.to_device(device)
     
     def plot_meshgrid(self, name_true, name_pred, savedir=None):
         # plot u at X_res, 

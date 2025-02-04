@@ -54,9 +54,6 @@ class BurgerProblem(BaseProblem):
 
         self.loss_dict['l2grad'] = self.get_l2grad
         
-        self.param = {'u0': 0.0}
-
-
         self.dataset = MatDataset(kwargs['datafile'])
         self.v = self.dataset['v']
     
@@ -123,16 +120,7 @@ class BurgerProblem(BaseProblem):
         
         return net
 
-    def print_info(self):
-        # print info of pde
-        # print all parameters
-        print('Parameters:')
-        for k,v in self.param.items():
-            print(f'{k} = {v}')
     
-
-    
-
     def griddata_to_tensor(self, gt, gx, u):
         '''convert grid data to tensor for training'''
         X_res = np.column_stack((gt.reshape(-1, 1), gx.reshape(-1, 1)))

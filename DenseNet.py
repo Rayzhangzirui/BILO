@@ -5,7 +5,6 @@ from typing import Callable, Dict, List, Optional, Union
 import torch
 import torch.nn as nn
 
-import loralib as lora
 
 from util import *
 from config import *
@@ -47,8 +46,6 @@ class DenseNet(nn.Module):
                 act: str = 'tanh',
                 modifiedmlp: bool = False,
                 train_embed: bool = False,
-                rank: int = 4,
-                lora_alpha: float = 1.0,
                 **kwargs):
         super().__init__()
         
@@ -76,9 +73,7 @@ class DenseNet(nn.Module):
         self.modifiedmlp = modifiedmlp
         # train the embedding weight of the PDE parameter
         self.train_embed = train_embed
-        # for LoRA
-        self.rank = rank
-        self.lora_alpha = lora_alpha
+
         
         self.with_func = False
 
@@ -154,13 +149,13 @@ class DenseNet(nn.Module):
             # torch.nn.init.uniform_(self.fflayer.bias, a=0, b=1)
 
             set_module_require_grad(self.fflayer, self.rff_trainable)
-            self.input_layer = lora.Linear(width, width, r=self.rank, lora_alpha=self.lora_alpha)
+            self.input_layer = nn.Linear(width, width)
         else:
-            self.input_layer = lora.Linear(input_dim, width, r=self.rank, lora_alpha=self.lora_alpha)
+            self.input_layer = nn.Linear(input_dim, width,)
 
         # depth = input + hidden + output
-        self.hidden_layers = nn.ModuleList([lora.Linear(width, width,r=self.rank, lora_alpha=self.lora_alpha) for _ in range(depth - 2)])
-        self.output_layer = lora.Linear(width, output_dim, r=self.rank, lora_alpha=self.lora_alpha)
+        self.hidden_layers = nn.ModuleList([nn.Linear(width, width) for _ in range(depth - 2)])
+        self.output_layer = nn.Linear(width, output_dim)
 
         # initailize the weights with glorot uniform
         # for layer in [self.input_layer] + list(self.hidden_layers) + [self.output_layer]:
@@ -220,7 +215,7 @@ class DenseNet(nn.Module):
             self.input_layer_v = nn.Linear(input_dim, width)
 
         # depth = input + k hidden + output
-        self.hidden_layers = nn.ModuleList([lora.Linear(width, width,r = self.rank) for _ in range(depth - 2)])
+        self.hidden_layers = nn.ModuleList([nn.Linear(width, width,r = self.rank) for _ in range(depth - 2)])
         self.output_layer = nn.Linear(width, output_dim)
         
         # activation function
@@ -266,27 +261,9 @@ class DenseNet(nn.Module):
         # neural net parameter exclude parameter embedding and fourier feature embedding layer
         # Initialize lists
         self.param_net = []
-        self.param_lora = []  # This will hold only LoRA parameters
 
         for layer in [self.input_layer] + list(self.hidden_layers) + [self.output_layer]:
-            # Check if this is a LoRA-enhanced linear layer
-            if isinstance(layer, lora.Linear):
-                # Separate LoRA and non-LoRA parameters by name
-                for name, param in layer.named_parameters():
-                    if 'lora' in name.lower():
-                        self.param_lora.append(param)
-                    else:
-                        self.param_net.append(param)
-            else:
-                # Normal layer, add all parameters
-                self.param_net.extend(list(layer.parameters()))
-
-        # only train the low-rank parameters
-        if self.rank > 0:
-            # set all param_net to be not trainable
-            for param in self.param_net:
-                param.requires_grad = False
-            self.param_net = self.param_lora
+            self.param_net.extend(list(layer.parameters()))
             
 
         if self.fourier and self.rff_trainable:
