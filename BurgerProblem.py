@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# PoissonProblem with variable parameter
+# Burger's equation, infer initial condition
 import torch
 from torch import nn
 import os
@@ -88,7 +88,6 @@ class BurgerProblem(BaseProblem):
         # get data loss
         u_pred = net(self.dataset['X_dat_train'], net.pde_params_dict)
         loss = torch.mean(torch.square(u_pred - self.dataset['u_dat_train']))
-        
         return loss
     
     def get_l2grad(self, net):
@@ -114,7 +113,6 @@ class BurgerProblem(BaseProblem):
         self.all_params_dict = {'u0': self.param_fun}
 
         net = BurgerDenseNet(**kwargs,
-                        lambda_transform=self.lambda_transform,
                         all_params_dict= self.all_params_dict,
                         trainable_param = self.opts['trainable_param'])
         

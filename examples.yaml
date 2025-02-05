@@ -70,7 +70,7 @@ burger:
   optim: "max_iter 5000 burnin 5000  N_ic_train 101 N_dat_train 11"
   bl:
     init:
-      opts: "testcase 3 traintype bilo-init run_name burger_bl_init"
+      opts: "testcase 3 traintype bilo-init"
       loss: "loss_net res,fullresgrad,data,funcloss weights fullresgrad,0.1"
     inv:
       traintype: "restore examples:burger_bl_init traintype bilo-simu"
@@ -78,7 +78,7 @@ burger:
       testcase: "testcase 1"
   pn:
     init:
-      opts: "testcase 3 traintype pinn-init run_name burger_pn_init"
+      opts: "testcase 3 traintype pinn-init"
       loss: "loss_net res,data,funcloss weights fullresgrad,0.1"
     inv:
       traintype: "restore examples:burger_pn_init traintype pinn-inv"
@@ -143,3 +143,28 @@ fk_no:
     # coarse:
     #   restore: "restore examples:no_init_coarse"
       # <<: *nzs
+
+
+# Heat Equation example
+heat:
+  <<: *logging
+  common: "problem heat trainable_param u0 flags fixiter width 128 fwidth 64 output_activation softplus"
+  experiment: "experiment_name examples"
+  data: "Nt 51 Nx 51 datafile dataset/heat-2.mat"
+  optim: "max_iter 2000 N_ic_train 101 N_dat_train 51"
+  bl:
+    init:
+      opts: "testcase 0 traintype bilo-init"
+      loss: "loss_net res,fullresgrad,data,funcloss weights fullresgrad,0.1"
+    inv:
+      traintype: "restore examples:heat_bl_init traintype bilo-simu"
+      loss: "loss_net res,fullresgrad loss_pde data weights fullresgrad,0.1" 
+      testcase: "testcase 2"
+  pn:
+    init:
+      opts: "testcase 0 traintype pinn-init"
+      loss: "loss_net res,data,funcloss weights fullresgrad,0.1"
+    inv:
+      traintype: "restore examples:heat_pn_init traintype pinn-inv"
+      loss: "loss_net res,data,l2grad weights data,1.0"
+      testcase: "testcase 2"
