@@ -10,10 +10,12 @@ This repository contains the code for the paper "[BiLO: Bilevel Local Operator L
 
 
 ## Tutorial
-See the [tutorial 1](tutorial_scalar.ipynb) for example of lear
+See the [tutorial 1](tutorial_scalar.ipynb) (PyTorch) for example of lear
 ning unknown scalar PDE paramters.
 
 See the [tutorial 2](tutorial_vector.ipynb) for example of learning unknown function.
+
+See the [tutorial 3](tutorial_scalar_modulus.ipynb) for example of using modulus and modulus-sym.
 
 ## Citing
 If you use BiLO, please cite the following paper:
