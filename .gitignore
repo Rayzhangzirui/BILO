@@ -1,0 +1,13 @@
+mlruns/
+newruns/
+*.pth
+fig*/
+runs/
+tmp*/
+dataset/
+PyTorch_LBFGS/
+__pycache__/
+torchnotes/
+*.sh
+yaml*/
+Langevin-dynamics/
