@@ -1,0 +1,92 @@
+# NOTE:
+# The yaml file is processed by ExpScheduler.py to generate commands for running experiments.
+# Example:
+# A:
+#   B: "arg1 arg2 arg3"
+# will be parsed as A_B: arg1 arg2 arg3, where A_B will be the runname and arg1 arg2 arg3 will be the arguments passed to the run
+
+
+# logging options
+logging: &logging
+  log: "use_mlflow True use_stdout False"       #log and save results through mlflow
+  # log: "use_mlflow False use_stdout True"         #log to stdout and save results locally
+
+
+# Nonlinear Poisson example
+np:
+  <<: *logging
+  common: "problem nonlinearpoisson datafile dataset/nonlinPoisson.mat max_iter 5000 lf_steps 10  burnin 0 example_every 100  trainable_param k"
+  arch: " width 128 depth 4"
+  experiment: "experiment_name bayes_example acc_threshold -1"
+  # Bayesian PINN
+  bpinn:
+    init:
+      data: " N_res_train 51 N_dat_train 21 "
+      type: "traintype pinn-init init_param k,0.6 gt_param k,0.6"
+      loss: "loss_net res,data max_iter 2000 burnin 2000"
+    hmc:
+      common: "restore bayes_example:np_bpinn_init "
+      data: " N_res_train 51 N_dat_train 6 gt_param k,0.7 use_noise True exclude_bd True"
+      traintype: "traintype bpinn-hmc"
+      loss: "loss_pde post_res,post_data,prior_weight"
+      training: "weights post_res,0.1,post_data,0.1 std 0.1 lr_pde 1e-3 lr_net 1e-3"
+  # BILO
+  bilo:
+    init:
+      data: " N_res_train 51 N_dat_train 21 gt_param k,0.6 init_param k,0.6 trainable_param k"
+      type: "traintype bilo-init "
+      loss: "loss_net res,fullresgrad,data max_iter 2000 burnin 2000 weights fullresgrad,0.1"
+    hmc:
+      common: "restore bayes_example:np_bilo_init "
+      data: " N_res_train 51 N_dat_train 6 gt_param k,0.7 use_noise True exclude_bd True"
+      traintype: "traintype bilo-hmc"
+      training: "loss_net res,fullresgrad loss_pde post_data"
+      opts: "weights post_data,0.1,res,1.0,fullresgrad,0.1 tol_lower 1e-4 std 0.1 lr_pde 0.01"
+
+
+# Gene Expression example
+pp:
+  <<: *logging
+  common: "problem pointprocess trainable_param mu,lmbd init_param lmbd,2.50,mu,5.0 gt_param lmbd,5.0,mu,10.0 N_res_train 101 n_snapshot 100 print_every 1 lr_net 1e-4"
+  experiment: "experiment_name bayes_example"
+  arch: "width 512 depth 4 fourier True"
+  # initialization
+  init:
+    type: "traintype bilo-init "
+    loss: "loss_net res,fullresgrad,data,jump,djump max_iter 2000 weights data,10,fullresgrad,0.1,djump,0.1 N_dat_train 101  gt_param lmbd,2.5,mu,5.0"
+  hmc:
+    traintype: "traintype bilo-hmc"
+    loss: "loss_net res,fullresgrad,jump,djump loss_pde particle,prior_param weights fullresgrad,0.1,djump,0.1"
+    train: "lr_pde 0.01 lf_steps 50 max_iter_lower 2000 tol_lower 10"
+    restore: "restore bayes_example:pp_init"
+    # full FT
+    r0:
+      opts: "rank 0"
+    # LoRA rank 2
+    r2:
+      opts: "rank 2"
+    # LoRA rank 4
+    r4:
+      opts: "rank 4"
+
+
+# 2D Darcy Bayesian example
+darcy:
+  experiment: "experiment_name bayes_example"
+  common: "problem darcy2dbayes datafile dataset/darcy2dbayessigmoid.mat trainable_param f"
+  arch: " depth 6 width 512 fourier True transgrf sigmoid use_resnet True lr_net 1e-4" 
+  init:
+    type: "traintype bilo-init "
+    data: " Nx 61 Nx_train 61 testcase 1"
+    loss: "loss_net res,fullresgrad,data,funcloss max_iter 2000 burnin 2000 weights fullresgrad,0.1,funcloss,10"
+  hmc:
+    sampling: "max_iter 500  burnin 0 example_every 10 tol_lower 0.3 print_every 1"
+    lf: "lf_steps 100 lr_pde 0.001"
+    data: " Nx 61 Nx_train 31 use_noise True std 0.01 testcase 3"
+    traintype: "traintype bilo-hmc"
+    training: "loss_net res,fullresgrad loss_pde prior_fun,post_data weights fullresgrad,0.1,post_data,0.01,prior_fun,1"
+    opts: "restore bayes_example:darcy_init"
+    r0:
+      opts: "rank 0 reset_optim False"
+    r4:
+      opts: "rank 4"

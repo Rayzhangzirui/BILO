@@ -1,0 +1,170 @@
+# NOTE:
+# The yaml file is processed by ExpScheduler.py to generate commands for running experiments.
+# Example:
+# A:
+#   B: "arg1 arg2 arg3"
+# will be parsed as A_B: arg1 arg2 arg3, where A_B will be the runname and arg1 arg2 arg3 will be the arguments passed to the run
+
+
+# Uncomment to repeat experimetns with different seeds and noise levels
+seeds: &seeds
+  sd1:
+    seed: "seed 1"
+  # sd2:
+  #   seed: "seed 2"
+  # sd3:
+  #   seed: "seed 3"
+  # sd4:
+  #   seed: "seed 4"
+  # sd5:
+  #   seed: "seed 5"
+
+# noise levels
+nzs: &nzs
+  nz0:
+    noise: "use_noise False"
+    <<: *seeds
+  # nz4:
+  #   noise: "use_noise True std 0.01"
+  #   <<: *seeds
+  # nz2:
+  #   noise: "use_noise True std 0.1"
+  #   <<: *seeds
+
+# logging options
+logging: &logging
+  log: "use_mlflow True use_stdout False"       #log and save results through mlflow
+  # log: "use_mlflow False use_stdout True"         #log to stdout and save results locally
+
+# Poisson Equation with Variable Diffusion Coefficients
+poivar:
+  <<: *logging
+  common: "problem poivar trainable_param D flags fixiter datafile dataset/varpoi.mat fwidth 64 width 128"
+  experiment: "experiment_name examples2"
+  optim: "max_iter 20000 burnin 20000"
+  # BILO
+  bl:
+    init: 
+      # pre-training/initial guess
+      traintype: "traintype bilo-init"
+      loss: "loss_net res,fullresgrad,data loss_pde funcloss testcase 0 weights fullresgrad,0.1"
+    inv:  
+      # fine-tuning/inverse problem
+      traintype: "traintype bilo-simu N_dat_train 51 testcase 9 weights fullresgrad,0.1"
+      restore: "restore examples2:poivar_bl_init loss_net res,fullresgrad loss_pde data"
+  # PINN
+  pn:
+    init:
+      traintype: "traintype pinn-init"
+      loss: "loss_net res,data testcase 0 weights fullresgrad,0.1"
+    inv:
+      traintype: "traintype pinn-inv N_dat_train 51 testcase 9"
+      restore: "restore examples2:poivar_pn_init loss_net res,data"
+
+# Burger's Equation example
+burger:
+  <<: *logging
+  common: "problem burger trainable_param u0 flags fixiter width 128 fwidth 64"
+  experiment: "experiment_name examples2"
+  data: "Nt 51 Nx 51 datafile dataset/burger-02.mat"
+  optim: "max_iter 5000 burnin 5000  N_ic_train 101 N_dat_train 11"
+  bl:
+    init:
+      opts: "testcase 3 traintype bilo-init"
+      loss: "loss_net res,fullresgrad,data loss_pde funcloss weights fullresgrad,0.1"
+    inv:
+      traintype: "restore examples2:burger_bl_init traintype bilo-simu"
+      loss: "loss_net res,fullresgrad loss_pde data,l2grad weights fullresgrad,0.1,l2grad,0.001" 
+      testcase: "testcase 1"
+  pn:
+    init:
+      opts: "testcase 3 traintype pinn-init"
+      loss: "loss_net res,data,funcloss weights fullresgrad,0.1"
+    inv:
+      traintype: "restore examples2:burger_pn_init traintype pinn-inv"
+      loss: "loss_net res,data,l2grad weights data,1.0,l2grad,0.001 testcase 1"
+
+# Darcy flow example
+darcy:
+  <<: *logging
+  common: "problem darcy trainable_param f flags fixiter width 128 fwidth 64 Nt 51 Nx 51 fourier True"
+  experiment: "experiment_name examples2 max_iter 5000"
+  init:
+    traintye: "traintype bilo-init testcase 3 datafile dataset/darcy_sigmoid.mat"
+    loss: "loss_net res,fullresgrad,data loss_pde funcloss weights fullresgrad,0.1"
+  inv:
+    traintype: "traintype bilo-simu testcase 4 datafile dataset/darcy.mat"
+    loss: "restore examples2:darcy_init loss_net res,fullresgrad loss_pde data,l1grad weights fullresgrad,0.1,l1grad,1e-9"
+
+
+# Fisher KPP example
+# dat_use_res: False = use only final time (t=1) data for inference. True = use all time data (t=0 to t=1)
+fk:
+  <<: *logging
+  common: "problem fk trainable_param rD,rRHO flags fixiter width 128"
+  experiment: "experiment_name examples2"
+  optim: "init_param rD,1.0,rRHO,1.0 dat_use_res True"
+  data: "Nt 51 Nx 51 datafile dataset/fk.mat"
+  type: "trainable_param rRHO,rD"
+  bl:
+    init:
+      traintype: "traintype bilo-init testcase 1 max_iter 2000 "
+      loss: "loss_net res,fullresgrad,data weights fullresgrad,0.1"
+    inv:
+      traintype: "traintype bilo-simu N_dat_train 11 testcase 2"
+      loss: "restore examples2:fk_bl_init loss_net res,fullresgrad loss_pde data weights fullresgrad,0.1 max_iter 10000 lr_pde 1e-2"
+  pn:
+    init:
+      traintype: "traintype pinn-init testcase 1 max_iter 2000 "
+      loss: "loss_net res,data"
+    inv:
+      traintype: "traintype pinn-inv N_dat_train 11 testcase 2"
+      loss: "restore examples2:fk_pn_init loss_net res,data max_iter 10000"
+
+# Fisher KPP example with Neural Operator
+fk_no:
+  <<: *logging
+  common: "problem fkop width 128 branch_depth 5 trunk_depth 5"
+  experiment: "experiment_name examples2"
+  init:
+    training: "max_iter 5000 burnin 5000 batch_size 512 tolerance 1e-6"
+    traintype: "traintype deeponet-init"
+    dense:
+      datafile: "datafile dataset/fk_op_data_dense_n51.mat"
+    # coarse:
+    #   datafile: "datafile dataset/fk_op_data_coarse_n51.mat"
+  inv:
+    training: "max_iter 20000"
+    traintype: "traintype deeponet-inv N_dat_train 11 testcase 2"
+    data: "datafile dataset/fk.mat"
+    dense:
+      restore: "restore examples2:fk_no_init_dense"
+      # <<: *nzs
+    # coarse:
+    #   restore: "restore examples2:no_init_coarse"
+      # <<: *nzs
+
+
+# Heat Equation example
+heat:
+  <<: *logging
+  common: "problem heat trainable_param u0 flags fixiter width 128 fwidth 64 output_activation softplus"
+  experiment: "experiment_name examples2"
+  data: "Nt 51 Nx 51 datafile dataset/heat-2.mat"
+  optim: "max_iter 2000 N_ic_train 101 N_dat_train 51"
+  bl:
+    init:
+      opts: "testcase 0 traintype bilo-init"
+      loss: "loss_net res,fullresgrad,data loss_pde funcloss weights fullresgrad,0.1"
+    inv:
+      traintype: "restore examples2:heat_bl_init traintype bilo-simu"
+      loss: "loss_net res,fullresgrad loss_pde data weights fullresgrad,0.1" 
+      testcase: "testcase 2"
+  pn:
+    init:
+      opts: "testcase 0 traintype pinn-init"
+      loss: "loss_net res,data,funcloss weights fullresgrad,0.1"
+    inv:
+      traintype: "restore examples2:heat_pn_init traintype pinn-inv"
+      loss: "loss_net res,data,l2grad weights data,1.0"
+      testcase: "testcase 2"
